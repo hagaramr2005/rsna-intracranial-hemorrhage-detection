@@ -87,17 +87,27 @@ class GradCAM:
         target = output[0, class_idx]
         target.backward(retain_graph=True)
 
-        gradients = self.gradients.cpu().data.numpy()[0]
-        activations = self.activations.cpu().data.numpy()[0]
-        weights = np.mean(gradients, axis=(1, 2))
-        cam = np.zeros(activations.shape[1:], dtype=np.float32)
+        grads = self.gradients[0].cpu().data.numpy()
+        acts = self.activations[0].cpu().data.numpy()
 
+        # Grad-CAM++ formulation for precise lesion boundaries
+        grads_power_2 = grads ** 2
+        grads_power_3 = grads_power_2 * grads
+        sum_acts = np.sum(acts, axis=(1, 2), keepdims=True)
+        eps = 1e-7
+        aij = grads_power_2 / (2.0 * grads_power_2 + sum_acts * grads_power_3 + eps)
+        weights = np.sum(aij * np.maximum(grads, 0), axis=(1, 2))
+
+        cam = np.zeros(acts.shape[1:], dtype=np.float32)
         for i, w in enumerate(weights):
-            cam += w * activations[i, :, :]
+            cam += w * acts[i, :, :]
 
         cam = np.maximum(cam, 0)
         if np.max(cam) != 0:
             cam = cam / np.max(cam)
+
+        # Dynamic Thresholding: Cut off background diffuse noise (keep top 45% focus)
+        cam = np.where(cam > 0.45, cam, 0)
         return cv2.resize(cam, (256, 256))
 
 @st.cache_resource
