@@ -11,8 +11,8 @@ from PIL import Image
 
 st.set_page_config(page_title="NeuroScan AI - ICH Triage & Explainability", layout="wide")
 
-MODEL_PATH = "/content/drive/MyDrive/rsna_project/best_model.pt"
-THRESH_PATH = "/content/drive/MyDrive/rsna_project/calibrated_thresholds.npy"
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "best_model.pt")
+THRESH_PATH = os.path.join(os.path.dirname(__file__), "calibrated_thresholds.npy")
 SUBTYPES = ['epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural', 'any']
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

@@ -1,5 +1,3 @@
-*.pt
-*.pth
 *.zip
 *.dcm
 __pycache__/
