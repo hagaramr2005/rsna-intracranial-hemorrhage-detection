@@ -9,3 +9,4 @@ numpy
 scikit-learn
 Pillow
 fpdf2
+pydicom
