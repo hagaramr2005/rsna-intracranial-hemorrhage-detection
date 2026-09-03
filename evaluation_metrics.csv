@@ -1,0 +1,7 @@
+Subtype,AUROC,Optimal Threshold,Best F1-Score
+epidural,0.9512,0.3499,0.6607
+intraparenchymal,0.9625,0.3217,0.8098
+intraventricular,0.9815,0.2872,0.8258
+subarachnoid,0.9246,0.2697,0.6528
+subdural,0.9273,0.3095,0.6464
+any,0.9716,0.5017,0.8903

@@ -1,0 +1,11 @@
+*.pt
+*.pth
+*.zip
+*.dcm
+__pycache__/
+.ipynb_checkpoints/
+rsna_data/
+train_images/
+test_images/
+*.png
+*.jpg
