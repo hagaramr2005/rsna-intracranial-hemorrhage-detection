@@ -156,10 +156,15 @@ def export_pdf_report(patient_id, triage_status, max_conf, details_df, original_
     
     pdf.set_font("Helvetica", size=9)
     for _, row in details_df.iterrows():
-        pdf.cell(45, 6, str(row['Subtype']), 1)
-        pdf.cell(40, 6, f"{row['Confidence']}", 1)
-        pdf.cell(45, 6, f"{row['Threshold']}", 1)
-        pdf.cell(40, 6, str(row['Decision']), 1, ln=True)
+        sub_str = str(row['Subtype']).encode('latin-1', 'ignore').decode('latin-1')
+        conf_str = str(row['Confidence']).replace("±", "+/-").encode('latin-1', 'ignore').decode('latin-1')
+        thresh_str = str(row['Threshold']).encode('latin-1', 'ignore').decode('latin-1')
+        dec_str = str(row['Decision']).replace("🔴", "").replace("⚪", "").strip().upper()
+        
+        pdf.cell(45, 6, sub_str, 1)
+        pdf.cell(40, 6, conf_str, 1)
+        pdf.cell(45, 6, thresh_str, 1)
+        pdf.cell(40, 6, dec_str, 1, ln=True)
     pdf.ln(6)
 
     pdf.set_font("Helvetica", 'B', 12)
