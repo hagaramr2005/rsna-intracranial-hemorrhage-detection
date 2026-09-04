@@ -248,7 +248,8 @@ def apply_custom_window(hu_image, wl, ww):
     return windowed.astype(np.uint8)
 
 def read_scan(file_bytes, filename, wl=40, ww=80):
-    meta = {'patient_id': 'PT-EMERG-901', 'study_date': datetime.utcnow().strftime('%Y-%m-%d'), 'slice_thickness': 5.0}
+    clean_name = os.path.splitext(os.path.basename(filename))[0][:12].replace(" ", "_")
+meta = {'patient_id': f"PT-{clean_name.upper()}", 'study_date': datetime.utcnow().strftime('%Y-%m-%d'), 'slice_thickness': 5.0}
     if filename.lower().endswith('.dcm') and pydicom is not None:
         ds = pydicom.dcmread(io.BytesIO(file_bytes))
         pixel_array = ds.pixel_array.astype(np.float32)
@@ -465,7 +466,7 @@ with t2:
     st.write(slices_data[0]['meta']['patient_id'])
 with t3:
     st.markdown("**Processed Volume**")
-    st.write(f"{len(slices_data)} Slices {'(3D Multi-slice Audited)' if len(slices_data)>1 else ''}")
+    st.write(f"{len(slices_data)} Slice {'(3D Volumetric Audited)' if len(slices_data)>1 else '(2D Single-Slice Demo - 3D Filter Idle)'}")
 with t4:
     st.markdown("**Hemorrhage Probability (Risk Index)**")
     st.write(f"{peak_prob*100:.1f}%")
@@ -478,13 +479,30 @@ if len(slices_data) > 1:
 
 curr = slices_data[active_slice_idx]
 
+# Check which subtypes actually crossed their calibrated operating thresholds
+positive_subtypes = [s for s in SUBTYPES if s != 'any' and curr['means'][SUBTYPES.index(s)] >= thresholds.get(s, 0.5)]
+
 subtype_means = [curr['means'][i] for i in range(5)]
 top_subtype_idx = int(np.argmax(subtype_means))
-cam_target = top_subtype_idx if curr['is_acute'] else SUBTYPES.index('any')
-cam_map = cam_engine.generate(curr['tensor'], cam_target)
-
-top_sub_name = SUBTYPES[top_subtype_idx].capitalize()
+top_candidate_name = SUBTYPES[top_subtype_idx].capitalize()
 top_sub_p = curr['means'][top_subtype_idx]
+
+if len(positive_subtypes) > 0:
+    # Definitive subtype confirmed
+    top_sub_name = positive_subtypes[0].capitalize()
+    cam_target = SUBTYPES.index(positive_subtypes[0])
+    is_indeterminate_subtype = False
+elif curr['is_acute']:
+    # General bleed detected (Any positive), but individual subtypes did not hit isolated threshold
+    top_sub_name = "Indeterminate / Multi-compartment"
+    cam_target = top_subtype_idx  # Focus visual map on leading signal
+    is_indeterminate_subtype = True
+else:
+    top_sub_name = "None"
+    cam_target = SUBTYPES.index('any')
+    is_indeterminate_subtype = False
+
+cam_map = cam_engine.generate(curr['tensor'], cam_target)
 
 # Calculation of Subtype-Aware Metrics & Tilt-Corrected Midline Shift
 bio = compute_subtype_biomarkers(cam_map, top_sub_name, curr['is_acute'], curr['meta']['slice_thickness'])
@@ -609,12 +627,17 @@ if not curr['is_acute']:
     )
 else:
     urgency_text = "EMERGENT SURGICAL NOTIFICATION" if bio["urgency"].startswith("SURGICAL") or is_critical_shift else "URGENT NEUROLOGICAL READ"
+    if is_indeterminate_subtype:
+        diag_str = f"Acute intracranial hemorrhage with indeterminate subtype (Leading pattern: {top_candidate_name} {top_sub_p*100:.1f}%, below independent threshold)"
+    else:
+        diag_str = f"Acute {top_sub_name} hemorrhage (Subtype threshold exceeded at {top_sub_p*100:.1f}%)"
+
     clinical_impression = (
-        f"FINDINGS: Acute hyperdense focal lesion identified on axial scan with maximal features consistent with {top_sub_name} hemorrhage. "
-        f"Biomarker evaluation: {bio['metric_name']} = {bio['val_str']} ({bio['note']}). "
+        f"FINDINGS: Hyperdense attenuation pattern identified on axial scan. Global Hemorrhage Risk Index: {curr['any_prob']*100:.1f}%. "
+        f"Biomarker evaluation: {bio['metric_name']} = {bio['val_str']}. "
         f"Tilt-corrected midline shift: {midline_shift_mm} mm ({'CRITICAL >5mm' if is_critical_shift else 'sub-critical'}). "
-        f"IMPRESSION: Acute {top_sub_name} hemorrhage with AI confidence {top_sub_p*100:.1f}%. "
-        f"RECOMMENDATION: {urgency_text} and urgent neurosurgical consultation."
+        f"IMPRESSION: {diag_str}. "
+        f"RECOMMENDATION: {urgency_text} and urgent neuroradiology overread."
     )
 
 st.markdown(f'<div class="report-preview">{clinical_impression}</div>', unsafe_allow_html=True)
@@ -623,7 +646,7 @@ st.write("")
 c_alert, c_pdf = st.columns(2)
 with c_alert:
     if st.button("🚨 Simulate STAT Emergency Webhook / Push Alert", use_container_width=True):
-        st.toast(f"STAT Push Alert Dispatched: {curr['meta']['patient_id']} - {top_sub_name} ({bio['val_str']})", icon="🚨")
+        st.toast(f"STAT Push Alert: {curr['meta']['patient_id']} | Priority STAT | Shift: {midline_shift_mm}mm", icon="🚨")
         st.success(f"Emergency Webhook payload sent to On-Call Neurosurgeon: Patient {curr['meta']['patient_id']} | Priority STAT")
 
 with c_pdf:
