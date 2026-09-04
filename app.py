@@ -1,3 +1,55 @@
+
+def apply_window(hu, center, width):
+   lower = center - width / 2.0
+   upper = center + width / 2.0
+   w_img = np.clip(hu, lower, upper)
+   return ((w_img - lower) / (upper - lower)).astype(np.float32)
+
+def prepare_rsna_tensor(hu):
+   # إنشاء القنوات الثلاث المعتمدة في تدريب RSNA
+   ch_brain = apply_window(hu, center=40, width=80)
+   ch_subdural = apply_window(hu, center=75, width=215)
+   ch_bone = apply_window(hu, center=600, width=2800)
+   
+   # دمج القنوات لتكوين صورة 3 قنوات
+   composite = np.stack([ch_brain, ch_subdural, ch_bone], axis=-1)
+   tensor = prepare_rsna_tensor(hu)
+
+    # Enforce deterministic state prior to inference
+    torch.manual_seed(GLOBAL_SEED)
+    np.random.seed(GLOBAL_SEED)
+    with torch.no_grad():
+        raw_out = model(tensor)
+        base_probs = torch.sigmoid(raw_out).cpu().numpy()[0]
+
+    # منع التصفير القسري والحفاظ على الاحتمالات الخام
+    means = base_probs
+    if enable_uncertainty:
+        margin_entropy = 4.0 * means * (1.0 - means)
+        stds = np.clip(margin_entropy * 0.035, 0.001, 0.045)
+    else:
+        stds = np.zeros_like(means)
+    any_idx = SUBTYPES.index('any') if 'any' in SUBTYPES else 0
+    is_acute = means[any_idx] >= thresholds.get('any', 0.5)
+
+    slices_data.append({
+        'name': f.name,
+        'rgb': rgb,
+        'hu': hu,
+        'tensor': tensor,
+        'means': means,
+        'stds': stds,
+        'is_acute': is_acute,
+        'any_prob': means[any_idx],
+        'meta': meta
+    })
+
+# --- 4. 3D Volumetric Consistency Filter ---
+if len(slices_data) >= 3:
+    for i in range(len(slices_data)):
+        if slices_data[i]['is_acute']:
+            prev_acute = slices_data[i-1]['is_acute'] if i > 0 else False
+            next_acute = slices_data[i+1]['is_acute'] if i < len(slices_data)-1 else False
             # If solitary blip without neighbors, mark as isolated artifact candidate
             if not prev_acute and not next_acute and slices_data[i]['any_prob'] < 0.65:
                 slices_data[i]['is_acute'] = False
