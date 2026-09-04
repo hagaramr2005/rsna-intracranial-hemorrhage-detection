@@ -10,3 +10,4 @@ scikit-learn
 Pillow
 fpdf2
 pydicom
+google-genai

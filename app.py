@@ -14,13 +14,17 @@ from datetime import datetime
 import io
 
 try:
+    from google import genai
+except ImportError:
+    genai = None
+
+try:
     import pydicom
 except ImportError:
     pydicom = None
 
 st.set_page_config(page_title="NeuroScan AI | Enterprise CDS Suite", layout="wide", initial_sidebar_state="expanded")
 
-# --- Custom Styling ---
 st.markdown("""
 <style>
     .metric-card {
@@ -65,7 +69,6 @@ THRESH_PATH = os.path.join(os.path.dirname(__file__), "calibrated_thresholds.npy
 SUBTYPES = ['epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural', 'any']
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# --- Grad-CAM++ Engine ---
 class GradCAMPlusPlus:
     def __init__(self, model, target_layer):
         self.model = model
@@ -125,7 +128,6 @@ except Exception as e:
     st.error(f"Clinical Engine Load Error: {e}")
     st.stop()
 
-# --- Interactive DICOM Windowing Physics ---
 def apply_custom_window(hu_image, wl, ww):
     lower = wl - (ww / 2.0)
     upper = wl + (ww / 2.0)
@@ -154,7 +156,6 @@ def read_scan(file_bytes, filename, wl=40, ww=80):
         hu = (gray.astype(np.float32) / 255.0) * 1000.0 - 500.0
         return rgb, hu, meta
 
-# --- Advanced Clinical Biomarkers: ABC/2 & Midline Shift ---
 def compute_abc2_volume(cam_map, slice_thickness=5.0, pixel_spacing=0.5):
     binary_mask = (cam_map > 0.45).astype(np.uint8)
     contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -179,7 +180,6 @@ def estimate_midline_shift(gray_hu):
     is_critical_shift = shift_mm > 5.0
     return shift_mm, is_critical_shift
 
-# --- Sanitized PDF Generation ---
 def export_clean_pdf(patient_id, study_date, is_acute, peak_conf, breakdown_df, impression, vol_cm3, shift_mm, orig_path, fused_path):
     pdf = FPDF()
     pdf.add_page()
@@ -242,10 +242,14 @@ def export_clean_pdf(patient_id, study_date, is_acute, peak_conf, breakdown_df, 
     return temp_out.name
 
 # --- Layout: Main Page ---
-st.title("🧠 NeuroScan AI — Enterprise Triage, PACS & Biomarker Suite")
-st.caption("Advanced Clinical Decision Support (CDS) with Automated ABC/2 Volumetry, Midline Shift & Interactive Windowing")
+st.title("🧠 NeuroScan AI — Multimodal CDS & Clinical Copilot")
+st.caption("Commercial-Grade Intracranial Hemorrhage Triage with LLM Clinical Reasoning & Quantitative Biomarkers")
 
 # --- Sidebar Controls ---
+st.sidebar.header("🔑 Gemini API Configuration")
+default_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+gemini_key = st.sidebar.text_input("Gemini API Key", value=default_key, type="password")
+
 st.sidebar.header("🎛️ PACS Window Presets")
 preset = st.sidebar.selectbox("Clinical Preset", ["Brain Standard (W:80, L:40)", "Subdural (W:130, L:75)", "Bone (W:2500, L:500)", "Stroke/Ischemia (W:40, L:40)", "Custom"])
 
@@ -308,11 +312,9 @@ for f in uploaded_files:
         'meta': meta
     })
 
-# Series Metrics
 peak_prob = max(s['any_prob'] for s in slices_data)
 exam_critical = any(s['is_acute'] for s in slices_data)
 
-# Triage Header
 st.subheader("1. Series Triage & Emergency Worklist Status")
 t1, t2, t3, t4 = st.columns(4)
 with t1:
@@ -335,11 +337,10 @@ st.markdown("---")
 
 active_slice_idx = 0
 if len(slices_data) > 1:
-    active_slice_idx = st.slider("3D Axial Navigation (Scroll through patient volume)", 0, len(slices_data)-1, 0, format="Slice %d")
+    active_slice_idx = st.slider("3D Axial Navigation", 0, len(slices_data)-1, 0, format="Slice %d")
 
 curr = slices_data[active_slice_idx]
 
-# --- Biomarkers: ABC/2 & Midline Shift Computation ---
 subtype_means = [curr['means'][i] for i in range(5)]
 top_subtype_idx = int(np.argmax(subtype_means))
 cam_target = top_subtype_idx if curr['is_acute'] else SUBTYPES.index('any')
@@ -348,14 +349,12 @@ cam_map = cam_engine.generate(curr['tensor'], cam_target)
 vol_cm3, dim_a, dim_b = compute_abc2_volume(cam_map, curr['meta']['slice_thickness'])
 midline_shift_mm, is_critical_shift = estimate_midline_shift(curr['hu'])
 
-# Saliency overlay
 h_o, w_o, _ = curr['rgb'].shape
 cam_full = cv2.resize(cam_map, (w_o, h_o))
 heatmap = cv2.applyColorMap(np.uint8(255 * cam_full), cv2.COLORMAP_JET)
 heatmap_rgb = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 overlay = np.uint8((1.0 - cam_opacity) * curr['rgb'] + cam_opacity * heatmap_rgb)
 
-# --- Biomarker Dashboard ---
 st.subheader("2. Quantitative Neuro-Biomarkers")
 b1, b2, b3, b4 = st.columns(4)
 with b1:
@@ -367,7 +366,6 @@ with b3:
 with b4:
     st.metric("Active Window Center/Width", f"L:{wl} / W:{ww} HU")
 
-# --- Visual Localization ---
 st.subheader(f"3. Explainable Localization & Diagnostic Fusion ({curr['name']})")
 c1, c2, c3 = st.columns(3)
 with c1:
@@ -377,7 +375,6 @@ with c2:
 with c3:
     st.image(overlay, caption="Diagnostic Fusion (Scan + Heatmap)", use_container_width=True)
 
-# --- Subtype Likelihood Table & Plotly ---
 st.subheader("4. Subtype Probability Breakdown vs Calibrated Thresholds")
 col_plot, col_table = st.columns([3, 2])
 
@@ -431,9 +428,7 @@ with col_table:
     df_table = pd.DataFrame(rows)
     st.dataframe(df_table, use_container_width=True, height=310)
 
-# --- Automated Impression & Export ---
-st.subheader("5. Structured Clinical Impression & Emergency Notification")
-
+st.subheader("5. Structured Clinical Impression & Official Export")
 top_sub_name = SUBTYPES[top_subtype_idx].capitalize()
 top_sub_p = curr['means'][top_subtype_idx]
 
@@ -493,3 +488,55 @@ with c_pdf:
                 mime="application/pdf",
                 use_container_width=True
             )
+
+# --- 6. Gemini Multimodal Clinical Copilot (NLP Integration) ---
+st.markdown("---")
+st.subheader("💬 6. Rad-Copilot: Interactive Clinical Assistant (Powered by Gemini)")
+st.caption("Ask questions about this specific scan, surgical implications, or radiological findings.")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+user_question = st.chat_input("Ex: Does this patient need urgent surgical craniotomy based on ABC/2 and midline shift?")
+
+if user_question:
+    st.session_state.messages.append({"role": "user", "content": user_question})
+    with st.chat_message("user"):
+        st.markdown(user_question)
+
+    gemini_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+    if not gemini_key or genai is None:
+        response_text = "⚠️ Gemini API Key is missing or library is initializing. Please verify the API key in the left sidebar."
+    else:
+        try:
+            client = genai.Client(api_key=gemini_key)
+            context_prompt = f"""
+You are a senior neuro-radiologist and AI clinical copilot.
+Analyze the current patient case based on these real AI inference biomarkers:
+- Patient ID: {curr['meta']['patient_id']}
+- Acute Hemorrhage Flag: {curr['is_acute']} (Peak Confidence: {curr['any_prob']*100:.1f}%)
+- Prominent Subtype: {top_sub_name} (Confidence: {top_sub_p*100:.1f}%)
+- Estimated Volume (ABC/2): {vol_cm3} cm³ (Surgical threshold is > 30 cm³)
+- Midline Shift: {midline_shift_mm} mm (Critical shift threshold is > 5 mm)
+- Clinical Impression: {clinical_impression}
+
+Doctor's Question: {user_question}
+
+Provide a concise, direct, clinical response citing relevant neurosurgical guidelines (e.g. Brain Trauma Foundation). Emphasize that final management is determined by the treating surgeon.
+"""
+            with st.spinner("Consulting Rad-Copilot..."):
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=context_prompt
+                )
+                response_text = response.text
+        except Exception as e:
+            response_text = f"Error communicating with Gemini: {e}"
+
+    with st.chat_message("assistant"):
+        st.markdown(response_text)
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
