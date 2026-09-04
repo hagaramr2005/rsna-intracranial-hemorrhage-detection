@@ -1,9 +1,3 @@
-
-if len(slices_data) >= 3:
-    for i in range(len(slices_data)):
-        if slices_data[i]['is_acute']:
-            prev_acute = slices_data[i-1]['is_acute'] if i > 0 else False
-            next_acute = slices_data[i+1]['is_acute'] if i < len(slices_data)-1 else False
             # If solitary blip without neighbors, mark as isolated artifact candidate
             if not prev_acute and not next_acute and slices_data[i]['any_prob'] < 0.65:
                 slices_data[i]['is_acute'] = False
