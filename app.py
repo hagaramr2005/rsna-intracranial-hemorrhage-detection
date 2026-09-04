@@ -425,8 +425,15 @@ for f in uploaded_files:
     rgb, hu, meta = read_scan(f_bytes, f.name, wl, ww)
     h_orig, w_orig, _ = rgb.shape
 
-    resized = cv2.resize(rgb, (256, 256))
-    norm_img = (resized.astype(np.float32) / 255.0 - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    # أبعاد النموذج القياسية (224x224)
+    resized = cv2.resize(rgb, (224, 224))
+    img_float = resized.astype(np.float32) / 255.0
+    
+    # تحقق من التطبيع: إذا كانت القيم مطبقة بنطاق [0, 1] القياسي
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    norm_img = (img_float - mean) / std
+    
     tensor = torch.tensor(norm_img.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
     # Enforce deterministic state prior to inference
