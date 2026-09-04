@@ -328,7 +328,7 @@ with t3:
     st.markdown("**Processed Volume**")
     st.write(f"{len(slices_data)} Slices")
 with t4:
-    st.markdown("**Peak Hemorrhage Probability**")
+    st.markdown("**Hemorrhage Probability (Risk Index)**")
     st.write(f"{peak_prob*100:.1f}%")
 
 st.markdown("---")
@@ -519,7 +519,7 @@ if user_question:
 You are a senior neuro-radiologist and AI clinical copilot.
 Analyze the current patient case based on these real AI inference biomarkers:
 - Patient ID: {curr['meta']['patient_id']}
-- Acute Hemorrhage Flag: {curr['is_acute']} (Peak Confidence: {curr['any_prob']*100:.1f}%)
+- Acute Hemorrhage Finding: {'POSITIVE (High Risk)' if curr['is_acute'] else 'NEGATIVE (Low Risk)'} | Probability of Hemorrhage Presence: {curr['any_prob']*100:.1f}% | Confidence in Negative Read: {(1 - curr['any_prob'])*100:.1f}%
 - Prominent Subtype: {top_sub_name} (Confidence: {top_sub_p*100:.1f}%)
 - Estimated Volume (ABC/2): {vol_cm3} cm³ (Surgical threshold is > 30 cm³)
 - Midline Shift: {midline_shift_mm} mm (Critical shift threshold is > 5 mm)
