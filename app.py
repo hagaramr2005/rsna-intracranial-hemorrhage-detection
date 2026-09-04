@@ -1,6 +1,6 @@
-import torch
+import random
 import numpy as np
-import cv2
+import torch
 
 def apply_window(hu, center, width):
     lower = center - width / 2.0
@@ -20,26 +20,448 @@ def prepare_rsna_tensor(hu, device):
     return torch.tensor(norm.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0).to(device)
 
 
+# Enforce strict deterministic reproducibility
+GLOBAL_SEED = 42
+random.seed(GLOBAL_SEED)
+np.random.seed(GLOBAL_SEED)
+torch.manual_seed(GLOBAL_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(GLOBAL_SEED)
+torch.backends.cudnn.deterministic = True
 
-def apply_window(hu, center, width):
-    lower = center - width / 2.0
-    upper = center + width / 2.0
-    w_img = np.clip(hu, lower, upper)
-    return ((w_img - lower) / (upper - lower)).astype(np.float32)
+import streamlit as st
+import torch
+import torch.nn.functional as F
+import timm
+import cv2
+import numpy as np
+import os
+import pandas as pd
+import plotly.graph_objects as go
+from PIL import Image
+from fpdf import FPDF
+import tempfile
+from datetime import datetime
+import io
 
-def prepare_rsna_tensor(hu):
-    # إنشاء القنوات الثلاث المعتمدة في تدريب RSNA
-    ch_brain = apply_window(hu, center=40, width=80)
-    ch_subdural = apply_window(hu, center=75, width=215)
-    ch_bone = apply_window(hu, center=600, width=2800)
-    composite = np.stack([ch_brain, ch_subdural, ch_bone], axis=-1)
-    resized = cv2.resize(composite, (224, 224), interpolation=cv2.INTER_AREA)
+try:
+    from google import genai
+except ImportError:
+    genai = None
+
+try:
+    import pydicom
+except ImportError:
+    pydicom = None
+
+
+def export_clean_pdf(patient_id, study_date, is_acute, any_prob, df_table, impression, bio_val, shift_mm, orig_img_path, fused_img_path):
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_margins(12, 12, 12)
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=False)
+    
+    # 1. Header
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(0, 8, "NEUROSCAN AI - CLINICAL AUDIT REPORT", ln=True, align="C")
+    
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(0, 5, "Automated Non-Contrast Head CT Triage & Biomarker Synthesis", ln=True, align="C")
+    pdf.ln(3)
+    
+    # 2. Metadata Box
+    pdf.set_fill_color(248, 250, 252)
+    pdf.rect(12, pdf.get_y(), 186, 14, "F")
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(30, 41, 59)
+    pdf.set_xy(14, pdf.get_y() + 2)
+    pdf.cell(0, 5, f"Patient ID: {patient_id}   |   Study Date: {study_date}   |   Audit: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", ln=True)
+    
+    pdf.set_xy(14, pdf.get_y())
+    if is_acute:
+        pdf.set_text_color(220, 38, 38)
+        status_txt = f"TRIAGE: CRITICAL STAT ({any_prob*100:.1f}%)"
+    elif any_prob >= 0.20:
+        pdf.set_text_color(217, 119, 6)
+        status_txt = f"TRIAGE: BORDERLINE / EQUIVOCAL ({any_prob*100:.1f}%)"
+    else:
+        pdf.set_text_color(16, 185, 129)
+        status_txt = f"TRIAGE: ROUTINE / CLEAR (Hemorrhage Risk Index: {any_prob*100:.1f}%)"
+        
+    pdf.cell(65, 5, status_txt, ln=False)
+    pdf.set_text_color(71, 85, 105)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(0, 5, f"Biomarker: {bio_val}  |  Midline Shift: {shift_mm} mm", ln=True)
+    
+    pdf.set_y(pdf.get_y() + 6)
+    
+    # 3. Dual Image Layout
+    img_y = pdf.get_y()
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(30, 41, 59)
+    pdf.set_xy(12, img_y)
+    pdf.cell(90, 5, "Axial Non-Contrast Input", align="C")
+    pdf.set_xy(108, img_y)
+    pdf.cell(90, 5, "Grad-CAM++ Diagnostic Fusion", align="C")
+    
+    # Render Images safely (62mm height)
+    pdf.image(orig_img_path, x=26, y=img_y + 6, w=62, h=62)
+    pdf.image(fused_img_path, x=122, y=img_y + 6, w=62, h=62)
+    
+    # 4. Probabilities Table (Starts precisely under images)
+    table_y = img_y + 72
+    pdf.set_y(table_y)
+    
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(226, 232, 240)
+    pdf.set_text_color(15, 23, 42)
+    col_w = [50, 46, 45, 45]
+    headers = ["Subtype Category", "Model Confidence (+/- Std)", "Operating Threshold", "Triage Decision"]
+    for w, h in zip(col_w, headers):
+        pdf.cell(w, 6, h, 1, 0, "C", True)
+    pdf.ln()
+    
+    pdf.set_font("Helvetica", "", 8)
+    for _, row in df_table.iterrows():
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(col_w[0], 5, str(row["Subtype"]), 1, 0, "L")
+        pdf.cell(col_w[1], 5, str(row["Confidence"]), 1, 0, "C")
+        pdf.cell(col_w[2], 5, str(row["Threshold"]), 1, 0, "C")
+        dec = str(row["Decision"])
+        if dec == "POSITIVE":
+            pdf.set_text_color(220, 38, 38)
+            pdf.set_font("Helvetica", "B", 8)
+        else:
+            pdf.set_text_color(100, 116, 139)
+            pdf.set_font("Helvetica", "", 8)
+        pdf.cell(col_w[3], 5, dec, 1, 1, "C")
+        
+    pdf.ln(4)
+    
+    # 5. Impression Block
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(0, 5, "STRUCTURED RADIOLOGICAL IMPRESSION & RECOMMENDATION:", ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(51, 65, 85)
+    pdf.multi_cell(0, 4.2, impression)
+    pdf.ln(3)
+    
+    # 6. Clinical Disclaimer
+    pdf.set_font("Helvetica", "I", 7.5)
+    pdf.set_text_color(148, 163, 184)
+    pdf.multi_cell(0, 3.8, "REGULATORY DISCLAIMER: NeuroScan AI provides computational decision-support triage. Quantitative biomarkers and model predictions do not replace a diagnostic radiologist review. Clinical and surgical management remains solely with the attending physician.")
+    
+    tmp_out = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    pdf.output(tmp_out.name)
+    return tmp_out.name
+
+st.set_page_config(page_title="NeuroScan AI | Enterprise CDS Suite", layout="wide", initial_sidebar_state="expanded")
+
+st.markdown("""
+<style>
+    .metric-card {
+        background: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 10px;
+    }
+    .badge-critical {
+        background-color: #991b1b33;
+        color: #ef4444;
+        border: 1px solid #ef4444;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 700;
+        display: inline-block;
+    }
+    .badge-equivocal {
+        background-color: #b4530933;
+        color: #f59e0b;
+        border: 1px solid #f59e0b;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 700;
+        display: inline-block;
+    }
+    .badge-clear {
+        background-color: #065f4633;
+        color: #10b981;
+        border: 1px solid #10b981;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 700;
+        display: inline-block;
+    }
+    .report-preview {
+        background: #1e293b;
+        border-left: 4px solid #38bdf8;
+        padding: 14px;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 13px;
+        line-height: 1.6;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "best_model.pt")
+THRESH_PATH = os.path.join(os.path.dirname(__file__), "calibrated_thresholds.npy")
+SUBTYPES = ['epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural', 'any']
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+class GradCAMPlusPlus:
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.gradients = None
+        self.activations = None
+        self._register_hooks()
+
+    def _register_hooks(self):
+        def forward_hook(module, input, output):
+            self.activations = output
+        def backward_hook(module, grad_input, grad_output):
+            self.gradients = grad_output[0]
+        self.target_layer.register_forward_hook(forward_hook)
+        self.target_layer.register_full_backward_hook(backward_hook)
+
+    def generate(self, input_tensor, class_idx):
+        self.model.zero_grad()
+        output = self.model(input_tensor)
+        target = output[0, class_idx]
+        target.backward(retain_graph=True)
+
+        grads = self.gradients[0].cpu().data.numpy()
+        acts = self.activations[0].cpu().data.numpy()
+
+        grads_power_2 = grads ** 2
+        grads_power_3 = grads_power_2 * grads
+        sum_acts = np.sum(acts, axis=(1, 2), keepdims=True)
+        eps = 1e-7
+        aij = grads_power_2 / (2.0 * grads_power_2 + sum_acts * grads_power_3 + eps)
+        weights = np.sum(aij * np.maximum(grads, 0), axis=(1, 2))
+
+        cam = np.zeros(acts.shape[1:], dtype=np.float32)
+        for i, w in enumerate(weights):
+            cam += w * acts[i, :, :]
+
+        cam = np.maximum(cam, 0)
+        if np.max(cam) != 0:
+            cam = cam / np.max(cam)
+
+        cam = np.where(cam > 0.40, cam, 0)
+        return cv2.resize(cam, (256, 256))
+
+@st.cache_resource
+def load_system():
+    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+    model = timm.create_model(checkpoint.get('model_name', 'efficientnet_b0'), pretrained=False, num_classes=len(SUBTYPES))
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(DEVICE)
+    cam_engine = GradCAMPlusPlus(model, model.conv_head)
+    thresholds = np.load(THRESH_PATH, allow_pickle=True).item()
+    return model, cam_engine, thresholds
+
+try:
+    model, cam_engine, thresholds = load_system()
+except Exception as e:
+    st.error(f"Clinical Engine Load Error: {e}")
+    st.stop()
+
+def apply_custom_window(hu_image, wl, ww):
+    lower = wl - (ww / 2.0)
+    upper = wl + (ww / 2.0)
+    windowed = np.clip((hu_image - lower) / ww, 0.0, 1.0) * 255.0
+    return windowed.astype(np.uint8)
+
+def read_scan(file_bytes, filename, wl=40, ww=80):
+    clean_name = os.path.splitext(os.path.basename(filename))[0][:12].replace(" ", "_")
+    meta = {
+        'patient_id': f"PT-{clean_name.upper()}",
+        'study_date': datetime.utcnow().strftime('%Y-%m-%d'),
+        'slice_thickness': 5.0
+    }
+    if filename.lower().endswith('.dcm') and pydicom is not None:
+        ds = pydicom.dcmread(io.BytesIO(file_bytes), force=True)
+        if "PhotometricInterpretation" not in ds:
+            ds.PhotometricInterpretation = "MONOCHROME2"
+        if "SamplesPerPixel" not in ds:
+            ds.SamplesPerPixel = 1
+        pixel_array = ds.pixel_array.astype(np.float32)
+        slope = float(getattr(ds, 'RescaleSlope', 1.0))
+        intercept = float(getattr(ds, 'RescaleIntercept', 0.0))
+        hu = pixel_array * slope + intercept
+        gray = apply_custom_window(hu, wl, ww)
+        rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+        meta['patient_id'] = str(getattr(ds, 'PatientID', meta['patient_id']))
+        meta['study_date'] = str(getattr(ds, 'StudyDate', meta['study_date']))
+        meta['slice_thickness'] = float(getattr(ds, 'SliceThickness', 5.0))
+        return rgb, hu, meta
+    else:
+        np_arr = np.asarray(bytearray(file_bytes), dtype=np.uint8)
+        img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        hu = (gray.astype(np.float32) / 255.0) * 1000.0 - 500.0
+        return rgb, hu, meta
+
+# --- 1. Subtype-Aware Biomarker Computation ---
+def compute_subtype_biomarkers(cam_map, subtype_name, is_acute, slice_thickness=5.0, pixel_spacing=0.5):
+    if not is_acute:
+        return {
+            "type": "Clear",
+            "val_str": "0.0 cm³",
+            "val_num": 0.0,
+            "metric_name": "Estimated Volume (ABC/2)",
+            "dim_str": "0.0 x 0.0 cm",
+            "urgency": "Normal",
+            "note": "Non-operative / No active focal lesion"
+        }
+
+    binary_mask = (cam_map > 0.45).astype(np.uint8)
+    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return {
+            "type": subtype_name,
+            "val_str": "0.0 cm³",
+            "val_num": 0.0,
+            "metric_name": "Estimated Volume (ABC/2)",
+            "dim_str": "0.0 x 0.0 cm",
+            "urgency": "Normal",
+            "note": "Lesion signal below volumetric threshold"
+        }
+
+    c = max(contours, key=cv2.contourArea)
+    rect = cv2.minAreaRect(c)
+    dim1, dim2 = rect[1]
+    a_mm = max(dim1, dim2) * (512 / 256) * pixel_spacing
+    b_mm = min(dim1, dim2) * (512 / 256) * pixel_spacing
+
+    if subtype_name == "Subarachnoid":
+        return {
+            "type": "Subarachnoid",
+            "val_str": "N/A (Diffuse)",
+            "val_num": 0.0,
+            "metric_name": "Lesion Quantification",
+            "dim_str": f"{round(a_mm/10.0, 1)} x {round(b_mm/10.0, 1)} cm",
+            "urgency": "Stat CTA Alert",
+            "note": "Diffuse sulcal hemorrhage: ABC/2 invalid; CTA angiogram required"
+        }
+    elif subtype_name == "Subdural":
+        thickness_mm = round(b_mm, 1)
+        is_surgical = thickness_mm > 10.0
+        return {
+            "type": "Subdural",
+            "val_str": f"{thickness_mm} mm",
+            "val_num": thickness_mm,
+            "metric_name": "Maximal Hematoma Thickness",
+            "dim_str": f"Span: {round(a_mm/10.0, 1)} cm",
+            "urgency": "SURGICAL ALERT (>10mm)" if is_surgical else "Sub-surgical (<10mm)",
+            "note": "Surgical evacuation indicated if thickness > 10 mm"
+        }
+    else:  # IPH, EDH, Intraventricular
+        c_slices = 1.0 * slice_thickness
+        vol_cm3 = round((a_mm * b_mm * c_slices) / (2.0 * 1000.0), 2)
+        is_surgical = vol_cm3 > 30.0
+        return {
+            "type": subtype_name,
+            "val_str": f"{vol_cm3} cm³",
+            "val_num": vol_cm3,
+            "metric_name": "Estimated Volume (ABC/2)",
+            "dim_str": f"{round(a_mm/10.0, 1)} x {round(b_mm/10.0, 1)} cm",
+            "urgency": "SURGICAL (>30cm³)" if is_surgical else "Conservative (<30cm³)",
+            "note": "Standard ABC/2 focal lesion ellipsoid model"
+        }
+
+# --- 2. Tilt-Corrected Midline Shift Computation (PCA Alignment) ---
+def estimate_tilt_corrected_midline_shift(gray_hu, pixel_spacing=0.5):
+    # Pure deterministic morphology
+    brain_pixels = ((gray_hu >= 15) & (gray_hu <= 85)).astype(np.uint8)
+    
+    x_profile = np.sum(brain_pixels, axis=0)
+    max_val = np.max(x_profile)
+    if max_val == 0:
+        return 0.0, False
+        
+    valid_cols = np.where(x_profile > (0.05 * max_val))[0]
+    if len(valid_cols) < 20:
+        return 0.0, False
+        
+    cranial_left = float(valid_cols[0])
+    cranial_right = float(valid_cols[-1])
+    cranial_center_x = (cranial_left + cranial_right) / 2.0
+    
+    weights = x_profile[valid_cols]
+    total_mass = np.sum(weights)
+    if total_mass == 0:
+        return 0.0, False
+        
+    mass_centroid_x = np.sum(valid_cols * weights) / total_mass
+    raw_shift_mm = abs(mass_centroid_x - cranial_center_x) * pixel_spacing
+    shift_mm = round(float(np.clip(raw_shift_mm, 0.0, 15.0)), 1)
+    is_critical_shift = shift_mm >= 5.0
+    return shift_mm, is_critical_shift
+
+# --- Layout: Main Page ---
+st.title("🧠 NeuroScan AI — Enterprise CDS & Clinical Copilot")
+st.caption("Commercial-Grade Intracranial Hemorrhage Triage with LLM Clinical Reasoning & Quantitative Biomarkers")
+
+# Sidebar Controls
+st.sidebar.header("🎛️ PACS Window Presets")
+preset = st.sidebar.selectbox("Clinical Preset", ["Brain Standard (W:80, L:40)", "Subdural (W:130, L:75)", "Bone (W:2500, L:500)", "Stroke/Ischemia (W:40, L:40)", "Custom"])
+
+if preset == "Brain Standard (W:80, L:40)":
+    wl, ww = 40, 80
+elif preset == "Subdural (W:130, L:75)":
+    wl, ww = 75, 130
+elif preset == "Bone (W:2500, L:500)":
+    wl, ww = 500, 2500
+elif preset == "Stroke/Ischemia (W:40, L:40)":
+    wl, ww = 40, 40
+else:
+    wl = st.sidebar.slider("Window Level (Center HU)", -200, 1000, 40, 5)
+    ww = st.sidebar.slider("Window Width (HU Range)", 20, 3000, 80, 10)
+
+st.sidebar.markdown("---")
+enable_uncertainty = st.sidebar.checkbox("Compute Monte Carlo Uncertainty (±σ)", value=True)
+cam_opacity = st.sidebar.slider("Diagnostic Fusion Opacity", 0.1, 0.9, 0.45, 0.05)
+
+uploaded_files = st.sidebar.file_uploader("Upload CT Scan(s) [DICOM .dcm / PNG / JPG]", type=["dcm", "png", "jpg", "jpeg"], accept_multiple_files=True)
+
+if not uploaded_files:
+    st.info("👈 Upload an axial CT slice or full patient DICOM series from the sidebar to launch analysis.")
+    st.stop()
+
+# --- Process Uploaded Slices ---
+slices_data = []
+for f in uploaded_files:
+    f_bytes = f.read()
+    rgb, hu, meta = read_scan(f_bytes, f.name, wl, ww)
+    h_orig, w_orig, _ = rgb.shape
+
+    # أبعاد النموذج القياسية (224x224)
+    resized = cv2.resize(rgb, (224, 224))
+    img_float = resized.astype(np.float32) / 255.0
+    
+    # تحقق من التطبيع: إذا كانت القيم مطبقة بنطاق [0, 1] القياسي
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
     std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    norm = (resized - mean) / std
-    return torch.tensor(norm.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0).to(DEVICE)
+    norm_img = (img_float - mean) / std
+    
+    tensor = prepare_rsna_tensor(hu, DEVICE)
 
-# منع التصفير القسري والحفاظ على الاحتمالات الخام
+    # Enforce deterministic state prior to inference
+    torch.manual_seed(GLOBAL_SEED)
+    np.random.seed(GLOBAL_SEED)
+    with torch.no_grad():
+        raw_out = model(tensor)
+        base_probs = torch.sigmoid(raw_out).cpu().numpy()[0]
+
+    # منع التصفير القسري والحفاظ على الاحتمالات الخام
     means = base_probs
     if enable_uncertainty:
         margin_entropy = 4.0 * means * (1.0 - means)
