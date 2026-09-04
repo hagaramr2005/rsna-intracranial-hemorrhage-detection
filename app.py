@@ -434,11 +434,21 @@ top_sub_name = SUBTYPES[top_subtype_idx].capitalize()
 top_sub_p = curr['means'][top_subtype_idx]
 
 if not curr['is_acute']:
+    # Clinical Tri-tier Logic: Differentiate true clear scans from borderline/equivocal scans
+    if curr['any_prob'] >= 0.20:
+        triage_status = "BORDERLINE / EQUIVOCAL"
+        rec_action = "URGENT NEURORADIOLOGY OVERREAD ADVISED (Elevated indeterminate suspicion)"
+        finding_note = f"Borderline attenuation pattern observed (Hemorrhage suspicion index: {curr['any_prob']*100:.1f}%)."
+    else:
+        triage_status = "NEGATIVE / LOW RISK"
+        rec_action = "Routine emergency worklist."
+        finding_note = "Physiological ventricular architecture with no focal hyperdensities."
+
     clinical_impression = (
-        f"FINDINGS: Axial non-contrast CT brain demonstrates physiological ventricular architecture. "
-        f"No intracranial mass effect or midline shift ({midline_shift_mm} mm). "
-        f"IMPRESSION: Negative for acute intracranial hemorrhage (Screening confidence: {(1 - curr['any_prob']) * 100:.1f}%). "
-        f"RECOMMENDATION: Routine emergency worklist."
+        f"FINDINGS: Axial non-contrast CT brain demonstrates {finding_note} "
+        f"Midline shift calculated at {midline_shift_mm} mm (preserved). "
+        f"IMPRESSION: Non-definitive for overt acute hemorrhage ({triage_status}). "
+        f"RECOMMENDATION: {rec_action}"
     )
 else:
     urgency_text = "EMERGENT SURGICAL NOTIFICATION" if vol_cm3 > 30.0 or is_critical_shift else "URGENT NEUROLOGICAL READ"
@@ -519,7 +529,7 @@ if user_question:
 You are a senior neuro-radiologist and AI clinical copilot.
 Analyze the current patient case based on these real AI inference biomarkers:
 - Patient ID: {curr['meta']['patient_id']}
-- Acute Hemorrhage Finding: {'POSITIVE (High Risk)' if curr['is_acute'] else 'NEGATIVE (Low Risk)'} | Probability of Hemorrhage Presence: {curr['any_prob']*100:.1f}% | Confidence in Negative Read: {(1 - curr['any_prob'])*100:.1f}%
+- Acute Hemorrhage Finding: {'POSITIVE (High Risk)' if curr['is_acute'] else ('EQUIVOCAL / BORDERLINE (20-50%)' if curr['any_prob'] >= 0.20 else 'NEGATIVE (Low Risk <20%)')} | Probability of Hemorrhage Presence: {curr['any_prob']*100:.1f}% | Confidence in Negative Read: {(1 - curr['any_prob'])*100:.1f}%
 - Prominent Subtype: {top_sub_name} (Confidence: {top_sub_p*100:.1f}%)
 - Estimated Volume (ABC/2): {vol_cm3} cm³ (Surgical threshold is > 30 cm³)
 - Midline Shift: {midline_shift_mm} mm (Critical shift threshold is > 5 mm)
