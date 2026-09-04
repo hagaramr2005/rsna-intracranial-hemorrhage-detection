@@ -427,10 +427,6 @@ for f in uploaded_files:
         with torch.no_grad():
             means = torch.sigmoid(model(tensor)).cpu().numpy()[0]
             stds = np.zeros_like(means)
-    else:
-        with torch.no_grad():
-            means = torch.sigmoid(model(tensor)).cpu().numpy()[0]
-            stds = np.zeros_like(means)
 
     any_idx = SUBTYPES.index('any')
     is_acute = means[any_idx] >= thresholds.get('any', 0.5)
