@@ -249,7 +249,11 @@ def apply_custom_window(hu_image, wl, ww):
 
 def read_scan(file_bytes, filename, wl=40, ww=80):
     clean_name = os.path.splitext(os.path.basename(filename))[0][:12].replace(" ", "_")
-meta = {'patient_id': f"PT-{clean_name.upper()}", 'study_date': datetime.utcnow().strftime('%Y-%m-%d'), 'slice_thickness': 5.0}
+    meta = {
+        'patient_id': f"PT-{clean_name.upper()}",
+        'study_date': datetime.utcnow().strftime('%Y-%m-%d'),
+        'slice_thickness': 5.0
+    }
     if filename.lower().endswith('.dcm') and pydicom is not None:
         ds = pydicom.dcmread(io.BytesIO(file_bytes))
         pixel_array = ds.pixel_array.astype(np.float32)
@@ -258,9 +262,16 @@ meta = {'patient_id': f"PT-{clean_name.upper()}", 'study_date': datetime.utcnow(
         hu = pixel_array * slope + intercept
         gray = apply_custom_window(hu, wl, ww)
         rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-        meta['patient_id'] = str(getattr(ds, 'PatientID', 'ANONYMIZED'))
+        meta['patient_id'] = str(getattr(ds, 'PatientID', meta['patient_id']))
         meta['study_date'] = str(getattr(ds, 'StudyDate', meta['study_date']))
         meta['slice_thickness'] = float(getattr(ds, 'SliceThickness', 5.0))
+        return rgb, hu, meta
+    else:
+        np_arr = np.asarray(bytearray(file_bytes), dtype=np.uint8)
+        img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        hu = (gray.astype(np.float32) / 255.0) * 1000.0 - 500.0
         return rgb, hu, meta
     else:
         np_arr = np.asarray(bytearray(file_bytes), dtype=np.uint8)
