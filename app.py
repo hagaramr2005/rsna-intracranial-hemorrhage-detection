@@ -273,13 +273,6 @@ def read_scan(file_bytes, filename, wl=40, ww=80):
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         hu = (gray.astype(np.float32) / 255.0) * 1000.0 - 500.0
         return rgb, hu, meta
-    else:
-        np_arr = np.asarray(bytearray(file_bytes), dtype=np.uint8)
-        img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        hu = (gray.astype(np.float32) / 255.0) * 1000.0 - 500.0
-        return rgb, hu, meta
 
 # --- 1. Subtype-Aware Biomarker Computation ---
 def compute_subtype_biomarkers(cam_map, subtype_name, is_acute, slice_thickness=5.0, pixel_spacing=0.5):
