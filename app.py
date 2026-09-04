@@ -65,6 +65,9 @@ def prepare_model_tensor(hu: np.ndarray, device: torch.device) -> torch.Tensor:
     ch_bone = apply_window(hu, center=600, width=2800)
     composite = np.stack([ch_brain, ch_subdural, ch_bone], axis=-1)
     resized = cv2.resize(composite, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA)
+    
+    # تحويل القيم لمجال [0, 1] القياسي ثم تطبيق ImageNet Normalization
+    resized = np.clip(resized, 0.0, 1.0)
     norm = (resized - MEAN) / STD
     tensor = torch.from_numpy(norm.transpose(2, 0, 1)).float().unsqueeze(0)
     return tensor.to(device)
