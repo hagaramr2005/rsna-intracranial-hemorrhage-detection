@@ -633,7 +633,7 @@ with col_table:
         th = thresholds.get(s, 0.5)
         rows.append({
             "Subtype": s.capitalize(),
-            "Confidence": f"{p*100:.1f}% +/- {sd*100:.1f}%" if enable_uncertainty else f"{p*100:.1f}%",
+            "Confidence": f"{p*100:.2f}% +/- {sd*100:.2f}%" if enable_uncertainty else f"{p*100:.2f}%",
             "Threshold": f"{th*100:.1f}%",
             "Decision": "POSITIVE" if p >= th else "NEGATIVE"
         })
