@@ -1,3 +1,16 @@
+import random
+import numpy as np
+import torch
+
+# Enforce strict deterministic reproducibility
+GLOBAL_SEED = 42
+random.seed(GLOBAL_SEED)
+np.random.seed(GLOBAL_SEED)
+torch.manual_seed(GLOBAL_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(GLOBAL_SEED)
+torch.backends.cudnn.deterministic = True
+
 import streamlit as st
 import torch
 import torch.nn.functional as F
@@ -344,14 +357,15 @@ def compute_subtype_biomarkers(cam_map, subtype_name, is_acute, slice_thickness=
 
 # --- 2. Tilt-Corrected Midline Shift Computation (PCA Alignment) ---
 def estimate_tilt_corrected_midline_shift(gray_hu, pixel_spacing=0.5):
-    h, w = gray_hu.shape
-    # Segment intracranial tissue (excluding bone and air)
+    # Pure deterministic morphology
     brain_pixels = ((gray_hu >= 15) & (gray_hu <= 85)).astype(np.uint8)
     
-    # Calculate horizontal mass profile
     x_profile = np.sum(brain_pixels, axis=0)
-    valid_cols = np.where(x_profile > (0.05 * np.max(x_profile)))[0]
-    
+    max_val = np.max(x_profile)
+    if max_val == 0:
+        return 0.0, False
+        
+    valid_cols = np.where(x_profile > (0.05 * max_val))[0]
     if len(valid_cols) < 20:
         return 0.0, False
         
@@ -359,16 +373,13 @@ def estimate_tilt_corrected_midline_shift(gray_hu, pixel_spacing=0.5):
     cranial_right = float(valid_cols[-1])
     cranial_center_x = (cranial_left + cranial_right) / 2.0
     
-    # Anatomical mass centroid within cranial cavity
-    total_mass = np.sum(x_profile[valid_cols])
+    weights = x_profile[valid_cols]
+    total_mass = np.sum(weights)
     if total_mass == 0:
         return 0.0, False
-    mass_centroid_x = np.sum(valid_cols * x_profile[valid_cols]) / total_mass
-    
-    # Deterministic displacement in mm
+        
+    mass_centroid_x = np.sum(valid_cols * weights) / total_mass
     raw_shift_mm = abs(mass_centroid_x - cranial_center_x) * pixel_spacing
-    
-    # True physiological calibration
     shift_mm = round(float(np.clip(raw_shift_mm, 0.0, 15.0)), 1)
     is_critical_shift = shift_mm >= 5.0
     return shift_mm, is_critical_shift
@@ -414,17 +425,20 @@ for f in uploaded_files:
     norm_img = (resized.astype(np.float32) / 255.0 - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array([0.229, 0.224, 0.225], dtype=np.float32)
     tensor = torch.tensor(norm_img.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
+    # Enforce deterministic state prior to inference
+    torch.manual_seed(GLOBAL_SEED)
+    np.random.seed(GLOBAL_SEED)
+    
     with torch.no_grad():
         base_probs = torch.sigmoid(model(tensor)).cpu().numpy()[0]
     
+    means = base_probs
     if enable_uncertainty:
-        # Dynamic Epistemic Uncertainty: variance is proportional to boundary ambiguity p*(1-p)
-        # Higher near threshold boundaries, vanishingly small for definitive high/low confidences
-        means = base_probs
-        entropy_factor = base_probs * (1.0 - base_probs)
-        stds = np.round(entropy_factor * 0.12, 3)
+        # Fully deterministic analytical uncertainty: directly derived from classification boundary margin
+        # Ambiguous probabilities near 0.3-0.5 yield higher standard error; definitive predictions yield near zero
+        margin_entropy = 4.0 * base_probs * (1.0 - base_probs)  # Normalized [0, 1]
+        stds = np.round(margin_entropy * 0.035, 3)  # Max +/- 3.5% uncertainty at boundary
     else:
-        means = base_probs
         stds = np.zeros_like(means)
 
     any_idx = SUBTYPES.index('any')
