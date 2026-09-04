@@ -1,28 +1,45 @@
+import torch
+import numpy as np
+import cv2
 
 def apply_window(hu, center, width):
-   lower = center - width / 2.0
-   upper = center + width / 2.0
-   w_img = np.clip(hu, lower, upper)
-   return ((w_img - lower) / (upper - lower)).astype(np.float32)
+    lower = center - width / 2.0
+    upper = center + width / 2.0
+    w_img = np.clip(hu, lower, upper)
+    return ((w_img - lower) / (upper - lower)).astype(np.float32)
+
+def prepare_rsna_tensor(hu, device):
+    ch_brain = apply_window(hu, center=40, width=80)
+    ch_subdural = apply_window(hu, center=75, width=215)
+    ch_bone = apply_window(hu, center=600, width=2800)
+    composite = np.stack([ch_brain, ch_subdural, ch_bone], axis=-1)
+    resized = cv2.resize(composite, (224, 224), interpolation=cv2.INTER_AREA)
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    norm = (resized - mean) / std
+    return torch.tensor(norm.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0).to(device)
+
+
+
+def apply_window(hu, center, width):
+    lower = center - width / 2.0
+    upper = center + width / 2.0
+    w_img = np.clip(hu, lower, upper)
+    return ((w_img - lower) / (upper - lower)).astype(np.float32)
 
 def prepare_rsna_tensor(hu):
-   # إنشاء القنوات الثلاث المعتمدة في تدريب RSNA
-   ch_brain = apply_window(hu, center=40, width=80)
-   ch_subdural = apply_window(hu, center=75, width=215)
-   ch_bone = apply_window(hu, center=600, width=2800)
-   
-   # دمج القنوات لتكوين صورة 3 قنوات
-   composite = np.stack([ch_brain, ch_subdural, ch_bone], axis=-1)
-   tensor = prepare_rsna_tensor(hu)
+    # إنشاء القنوات الثلاث المعتمدة في تدريب RSNA
+    ch_brain = apply_window(hu, center=40, width=80)
+    ch_subdural = apply_window(hu, center=75, width=215)
+    ch_bone = apply_window(hu, center=600, width=2800)
+    composite = np.stack([ch_brain, ch_subdural, ch_bone], axis=-1)
+    resized = cv2.resize(composite, (224, 224), interpolation=cv2.INTER_AREA)
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    norm = (resized - mean) / std
+    return torch.tensor(norm.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
-    # Enforce deterministic state prior to inference
-    torch.manual_seed(GLOBAL_SEED)
-    np.random.seed(GLOBAL_SEED)
-    with torch.no_grad():
-        raw_out = model(tensor)
-        base_probs = torch.sigmoid(raw_out).cpu().numpy()[0]
-
-    # منع التصفير القسري والحفاظ على الاحتمالات الخام
+# منع التصفير القسري والحفاظ على الاحتمالات الخام
     means = base_probs
     if enable_uncertainty:
         margin_entropy = 4.0 * means * (1.0 - means)
