@@ -246,9 +246,7 @@ st.title("🧠 NeuroScan AI — Multimodal CDS & Clinical Copilot")
 st.caption("Commercial-Grade Intracranial Hemorrhage Triage with LLM Clinical Reasoning & Quantitative Biomarkers")
 
 # --- Sidebar Controls ---
-st.sidebar.header("🔑 Gemini API Configuration")
 default_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-gemini_key = st.sidebar.text_input("Gemini API Key", value=default_key, type="password")
 
 st.sidebar.header("🎛️ PACS Window Presets")
 preset = st.sidebar.selectbox("Clinical Preset", ["Brain Standard (W:80, L:40)", "Subdural (W:130, L:75)", "Bone (W:2500, L:500)", "Stroke/Ischemia (W:40, L:40)", "Custom"])
