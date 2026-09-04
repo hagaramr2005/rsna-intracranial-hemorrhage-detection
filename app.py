@@ -1,3 +1,23 @@
+
+def predict_with_mc_dropout(model, tensor, n_samples=10):
+    model.eval()
+    for m in model.modules():
+        if isinstance(m, (torch.nn.Dropout, torch.nn.Dropout2d)):
+            m.train()
+
+    preds = []
+    with torch.no_grad():
+        for _ in range(n_samples):
+            logits = model(tensor)
+            probs = torch.sigmoid(logits).cpu().numpy()[0]
+            preds.append(probs)
+
+    preds = np.array(preds)
+    means = np.mean(preds, axis=0)
+    stds = np.std(preds, axis=0)
+    return means, stds
+
+
 import random
 import numpy as np
 import torch
@@ -378,33 +398,38 @@ def compute_subtype_biomarkers(cam_map, subtype_name, is_acute, slice_thickness=
         }
 
 # --- 2. Tilt-Corrected Midline Shift Computation (PCA Alignment) ---
-def estimate_tilt_corrected_midline_shift(gray_hu, pixel_spacing=0.5):
-    # Pure deterministic morphology
-    brain_pixels = ((gray_hu >= 15) & (gray_hu <= 85)).astype(np.uint8)
+def estimate_tilt_corrected_midline_shift(hu_slice, pixel_spacing=(0.5, 0.5)):
+    bone_mask = (hu_slice > 300).astype(np.uint8)
+    pts = np.argwhere(bone_mask > 0)
     
-    x_profile = np.sum(brain_pixels, axis=0)
-    max_val = np.max(x_profile)
-    if max_val == 0:
+    if len(pts) < 100:
         return 0.0, False
-        
-    valid_cols = np.where(x_profile > (0.05 * max_val))[0]
-    if len(valid_cols) < 20:
-        return 0.0, False
-        
-    cranial_left = float(valid_cols[0])
-    cranial_right = float(valid_cols[-1])
-    cranial_center_x = (cranial_left + cranial_right) / 2.0
+
+    pts_xy = pts[:, [1, 0]].astype(np.float32)
+    mean_center, eigenvectors = cv2.PCACompute(pts_xy, mean=np.empty((0)))
     
-    weights = x_profile[valid_cols]
-    total_mass = np.sum(weights)
-    if total_mass == 0:
+    angle_rad = np.arctan2(eigenvectors[0, 1], eigenvectors[0, 0])
+    angle_deg = np.degrees(angle_rad) - 90.0
+
+    h, w = hu_slice.shape
+    rot_mat = cv2.getRotationMatrix2D((float(mean_center[0, 0]), float(mean_center[0, 1])), angle_deg, 1.0)
+    aligned_hu = cv2.warpAffine(hu_slice, rot_mat, (w, h), flags=cv2.INTER_LINEAR, borderValue=-1000)
+
+    brain_mask = ((aligned_hu >= 15) & (aligned_hu <= 85)).astype(np.uint8)
+    moments = cv2.moments(brain_mask)
+    
+    if moments["m00"] == 0:
         return 0.0, False
         
-    mass_centroid_x = np.sum(valid_cols * weights) / total_mass
-    raw_shift_mm = abs(mass_centroid_x - cranial_center_x) * pixel_spacing
-    shift_mm = round(float(np.clip(raw_shift_mm, 0.0, 15.0)), 1)
-    is_critical_shift = shift_mm >= 5.0
-    return shift_mm, is_critical_shift
+    actual_x = moments["m10"] / moments["m00"]
+    midline_x = mean_center[0, 0]
+    
+    shift_mm = abs(actual_x - midline_x) * pixel_spacing[0]
+    shift_mm = round(float(np.clip(shift_mm, 0.0, 15.0)), 2)
+    is_critical = shift_mm >= 5.0
+
+    return shift_mm, is_critical
+
 
 # --- Layout: Main Page ---
 st.title("🧠 NeuroScan AI — Enterprise CDS & Clinical Copilot")
@@ -457,16 +482,12 @@ for f in uploaded_files:
     # Enforce deterministic state prior to inference
     torch.manual_seed(GLOBAL_SEED)
     np.random.seed(GLOBAL_SEED)
-    with torch.no_grad():
-        raw_out = model(tensor)
-        base_probs = torch.sigmoid(raw_out).cpu().numpy()[0]
-
-    # منع التصفير القسري والحفاظ على الاحتمالات الخام
-    means = base_probs
     if enable_uncertainty:
-        margin_entropy = 4.0 * means * (1.0 - means)
-        stds = np.clip(margin_entropy * 0.035, 0.001, 0.045)
+        means, stds = predict_with_mc_dropout(model, tensor, n_samples=10)
     else:
+        with torch.no_grad():
+            raw_out = model(tensor)
+            means = torch.sigmoid(raw_out).cpu().numpy()[0]
         stds = np.zeros_like(means)
     any_idx = SUBTYPES.index('any') if 'any' in SUBTYPES else 0
     is_acute = means[any_idx] >= thresholds.get('any', 0.5)
