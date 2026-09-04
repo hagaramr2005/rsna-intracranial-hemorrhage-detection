@@ -268,7 +268,11 @@ def read_scan(file_bytes, filename, wl=40, ww=80):
         'slice_thickness': 5.0
     }
     if filename.lower().endswith('.dcm') and pydicom is not None:
-        ds = pydicom.dcmread(io.BytesIO(file_bytes))
+        ds = pydicom.dcmread(io.BytesIO(file_bytes), force=True)
+        if "PhotometricInterpretation" not in ds:
+            ds.PhotometricInterpretation = "MONOCHROME2"
+        if "SamplesPerPixel" not in ds:
+            ds.SamplesPerPixel = 1
         pixel_array = ds.pixel_array.astype(np.float32)
         slope = float(getattr(ds, 'RescaleSlope', 1.0))
         intercept = float(getattr(ds, 'RescaleIntercept', 0.0))
