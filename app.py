@@ -491,7 +491,7 @@ with c_pdf:
 
 # --- 6. Gemini Multimodal Clinical Copilot (NLP Integration) ---
 st.markdown("---")
-st.subheader("💬 6. Rad-Copilot: Interactive Clinical Assistant (Powered by Gemini)")
+st.subheader("💬 6. Rad-Copilot: Autonomous Clinical Reasoning & Case Consultation")
 st.caption("Ask questions about this specific scan, surgical implications, or radiological findings.")
 
 if "messages" not in st.session_state:
@@ -510,7 +510,7 @@ if user_question:
 
     gemini_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
     if not gemini_key or genai is None:
-        response_text = "⚠️ Gemini API Key is missing or library is initializing. Please verify the API key in the left sidebar."
+        response_text = "⚠️ Clinical AI reasoning engine is currently unavailable. Please verify system environment configuration."
     else:
         try:
             client = genai.Client(api_key=gemini_key)
@@ -528,14 +528,14 @@ Doctor's Question: {user_question}
 
 Provide a concise, direct, clinical response citing relevant neurosurgical guidelines (e.g. Brain Trauma Foundation). Emphasize that final management is determined by the treating surgeon.
 """
-            with st.spinner("Consulting Rad-Copilot..."):
+            with st.spinner("Analyzing scan findings & consulting clinical guidelines..."):
                 response = client.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=context_prompt
                 )
                 response_text = response.text
         except Exception as e:
-            response_text = f"Error communicating with Gemini: {e}"
+            response_text = f"Inference processing error: {e}"
 
     with st.chat_message("assistant"):
         st.markdown(response_text)
