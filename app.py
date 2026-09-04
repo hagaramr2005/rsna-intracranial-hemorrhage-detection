@@ -628,6 +628,37 @@ with c_alert:
 
 with c_pdf:
     if st.button("📄 Export Comprehensive Clinical PDF", use_container_width=True):
+        with st.spinner("Generating certified PDF..."):
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f1:
+                Image.fromarray(curr["rgb"]).save(f1.name)
+                orig_p = f1.name
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f2:
+                Image.fromarray(overlay).save(f2.name)
+                fused_p = f2.name
+
+            pdf_file = export_clean_pdf(
+                curr["meta"]["patient_id"],
+                curr["meta"]["study_date"],
+                curr["is_acute"],
+                curr["any_prob"],
+                df_table,
+                clinical_impression,
+                bio["val_str"],
+                midline_shift_mm,
+                orig_p,
+                fused_p
+            )
+            with open(pdf_file, "rb") as f:
+                st.session_state["cached_pdf"] = f.read()
+
+    if "cached_pdf" in st.session_state:
+        st.download_button(
+            label="⬇️ Download Certified PDF Audit",
+            data=st.session_state["cached_pdf"],
+            file_name=f"NeuroScan_Audit_{curr['meta']['patient_id']}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f1:
             Image.fromarray(curr['rgb']).save(f1.name)
             orig_p = f1.name
@@ -648,14 +679,7 @@ with c_pdf:
             fused_p
         )
 
-        with open(pdf_file, "rb") as pdf_data:
-            st.download_button(
-                label="⬇️ Download Certified PDF Audit",
-                data=pdf_data.read(),
-                file_name=f"NeuroScan_Audit_{curr['meta']['patient_id']}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+
 
 # --- 6. Autonomous Rad-Copilot (Clinical QA Engine) ---
 st.markdown("---")
