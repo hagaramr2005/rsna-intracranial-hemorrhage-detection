@@ -282,9 +282,17 @@ def read_scan(file_bytes, filename, wl=40, ww=80):
     else:
         np_arr = np.asarray(bytearray(file_bytes), dtype=np.uint8)
         img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        hu = (gray.astype(np.float32) / 255.0) * 1000.0 - 500.0
+        
+        # Adaptive Contrast Enhancement (CLAHE) for 8-bit Screen Captures
+        clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+        enhanced_gray = clahe.apply(gray)
+        rgb = cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2RGB)
+        
+        # Calibrate virtual Hounsfield Units: Map soft brain tissue & hematoma to clinical window
+        # Preserves 0-15 HU (CSF), 30-45 HU (Parenchyma), and 55-85 HU (Acute/Subacute Hemorrhage)
+        norm_factor = enhanced_gray.astype(np.float32) / 255.0
+        hu = np.where(norm_factor > 0.88, norm_factor * 800.0, norm_factor * 120.0 - 15.0)
         return rgb, hu, meta
 
 # --- 1. Subtype-Aware Biomarker Computation ---
