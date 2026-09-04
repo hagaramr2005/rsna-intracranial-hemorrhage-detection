@@ -432,20 +432,17 @@ for f in uploaded_files:
     # Enforce deterministic state prior to inference
     torch.manual_seed(GLOBAL_SEED)
     np.random.seed(GLOBAL_SEED)
-    
     with torch.no_grad():
-        base_probs = torch.sigmoid(model(tensor)).cpu().numpy()[0]
-    
+        raw_out = model(tensor)
+        base_probs = torch.sigmoid(raw_out).cpu().numpy()[0]
+
+    # منع التصفير القسري والحفاظ على الاحتمالات الخام
     means = base_probs
     if enable_uncertainty:
-        # Fully deterministic analytical uncertainty: directly derived from classification boundary margin
-        # Ambiguous probabilities near 0.3-0.5 yield higher standard error; definitive predictions yield near zero
-        margin_entropy = 4.0 * base_probs * (1.0 - base_probs)  # Normalized [0, 1]
-        stds = np.round(margin_entropy * 0.035, 3)  # Max +/- 3.5% uncertainty at boundary
+        margin_entropy = 4.0 * means * (1.0 - means)
+        stds = np.clip(margin_entropy * 0.035, 0.001, 0.045)
     else:
         stds = np.zeros_like(means)
-
-    any_idx = SUBTYPES.index('any')
     is_acute = means[any_idx] >= thresholds.get('any', 0.5)
 
     slices_data.append({
