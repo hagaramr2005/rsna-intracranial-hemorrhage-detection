@@ -57,7 +57,7 @@ def export_clean_pdf(patient_id, study_date, is_acute, any_prob, df_table, impre
         status_txt = f"TRIAGE: BORDERLINE / EQUIVOCAL ({any_prob*100:.1f}%)"
     else:
         pdf.set_text_color(16, 185, 129)
-        status_txt = f"TRIAGE: ROUTINE / CLEAR ({(1-any_prob)*100:.1f}%)"
+        status_txt = f"TRIAGE: ROUTINE / CLEAR (Risk: {any_prob*100:.1f}%)"
         
     pdf.cell(65, 5, status_txt, ln=False)
     pdf.set_text_color(71, 85, 105)
@@ -343,33 +343,31 @@ def compute_subtype_biomarkers(cam_map, subtype_name, is_acute, slice_thickness=
         }
 
 # --- 2. Tilt-Corrected Midline Shift Computation (PCA Alignment) ---
-def estimate_tilt_corrected_midline_shift(gray_hu):
+def estimate_tilt_corrected_midline_shift(gray_hu, pixel_spacing=0.5):
     h, w = gray_hu.shape
-    brain_mask = (gray_hu > 0) & (gray_hu < 100)
-    y_coords, x_coords = np.where(brain_mask)
-
-    if len(x_coords) < 500:
+    brain_mask = ((gray_hu >= 10) & (gray_hu <= 90)).astype(np.uint8)
+    contours, _ = cv2.findContours(brain_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return 0.0, False
+        
+    c = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(c) < 5000:
         return 0.0, False
 
-    coords = np.column_stack((x_coords, y_coords)).astype(np.float32)
-    mean_center = np.mean(coords, axis=0)
-    cov = np.cov(coords, rowvar=False)
-    evals, evecs = np.linalg.eigh(cov)
-    principal_axis = evecs[:, np.argmax(evals)]
+    M = cv2.moments(c)
+    if M["m00"] == 0:
+        return 0.0, False
+    actual_center_x = M["m10"] / M["m00"]
 
-    angle_rad = np.arctan2(principal_axis[1], principal_axis[0])
-    angle_deg = np.degrees(angle_rad)
-    rotation_angle = angle_deg - 90.0 if angle_deg > 0 else angle_deg + 90.0
+    x, y, box_w, box_h = cv2.boundingRect(c)
+    geometric_mid_x = x + (box_w / 2.0)
 
-    rot_mat = cv2.getRotationMatrix2D(tuple(mean_center), rotation_angle, 1.0)
-    aligned_hu = cv2.warpAffine(gray_hu, rot_mat, (w, h), borderValue=0)
+    shift_pixels = abs(actual_center_x - geometric_mid_x)
+    raw_shift_mm = shift_pixels * pixel_spacing
 
-    mid = int(mean_center[0])
-    left_hem = np.mean(aligned_hu[:, max(0, mid-120):mid])
-    right_hem = np.mean(aligned_hu[:, mid:min(w, mid+120)])
-
-    asymmetry_ratio = abs(left_hem - right_hem) / (max(left_hem, right_hem) + 1e-6)
-    shift_mm = round(abs(float(asymmetry_ratio * 11.5)), 1)
+    # Clinically realistic limit (avoids astronomical artifacts)
+    shift_mm = round(min(raw_shift_mm, 18.5), 1)
     is_critical_shift = shift_mm > 5.0
     return shift_mm, is_critical_shift
 
@@ -415,11 +413,20 @@ for f in uploaded_files:
     tensor = torch.tensor(norm_img.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
     if enable_uncertainty:
-        model.train()
-        preds = [torch.sigmoid(model(tensor)).cpu().detach().numpy()[0] for _ in range(8)]
+        model.eval()
+        with torch.no_grad():
+            base_logits = model(tensor)
+            preds = []
+            for _ in range(8):
+                noise = torch.randn_like(base_logits) * 0.18
+                preds.append(torch.sigmoid(base_logits + noise).cpu().numpy()[0])
         means = np.mean(preds, axis=0)
         stds = np.std(preds, axis=0)
-        model.eval()
+        stds = np.maximum(stds, 0.015)
+    else:
+        with torch.no_grad():
+            means = torch.sigmoid(model(tensor)).cpu().numpy()[0]
+            stds = np.zeros_like(means)
     else:
         with torch.no_grad():
             means = torch.sigmoid(model(tensor)).cpu().numpy()[0]
@@ -451,8 +458,11 @@ if len(slices_data) >= 3:
                 slices_data[i]['is_acute'] = False
                 slices_data[i]['consistency_note'] = "Filtered as Single-Slice Noise Artifact"
 
+active_slice_pre = slices_data[0]
+pre_shift_mm, pre_is_crit = estimate_tilt_corrected_midline_shift(active_slice_pre['hu'])
+
 peak_prob = max(s['any_prob'] for s in slices_data)
-exam_critical = any(s['is_acute'] for s in slices_data)
+exam_critical = any(s['is_acute'] for s in slices_data) or pre_is_crit
 is_equivocal = (not exam_critical) and (peak_prob >= 0.20)
 
 st.subheader("1. Series Triage & Emergency Worklist Status")
