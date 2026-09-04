@@ -189,7 +189,7 @@ def load_system():
         raise FileNotFoundError(f"{THRESHOLDS_PATH} not found. Run 05_evaluate.py first.")
 
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
-    backbone_name = checkpoint.get("backbone", "convnext_tiny")
+    backbone_name = checkpoint.get("backbone", "efficientnet_b0")
     model = timm.create_model(backbone_name, pretrained=False, num_classes=len(SUBTYPES))
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(DEVICE).eval()

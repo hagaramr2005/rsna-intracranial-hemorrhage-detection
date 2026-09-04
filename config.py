@@ -32,7 +32,7 @@ ANY_INDEX = LABEL_COLS.index("any")
 
 RSNA_CLASS_WEIGHTS = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 2.0])
 
-BACKBONE = "convnext_tiny"
+BACKBONE = "efficientnet_b0"
 NUM_CLASSES = len(LABEL_COLS)
 IMAGE_SIZE = 256
 
