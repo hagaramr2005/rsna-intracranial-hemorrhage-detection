@@ -176,7 +176,7 @@ def estimate_midline_shift(gray_hu):
     left_hem = np.mean(gray_hu[:, :mid])
     right_hem = np.mean(gray_hu[:, mid:])
     asymmetry_ratio = abs(left_hem - right_hem) / (max(left_hem, right_hem) + 1e-6)
-    shift_mm = round(float(asymmetry_ratio * 12.0), 1)
+    shift_mm = round(abs(float(asymmetry_ratio * 12.0)), 1)
     is_critical_shift = shift_mm > 5.0
     return shift_mm, is_critical_shift
 
@@ -344,7 +344,10 @@ top_subtype_idx = int(np.argmax(subtype_means))
 cam_target = top_subtype_idx if curr['is_acute'] else SUBTYPES.index('any')
 cam_map = cam_engine.generate(curr['tensor'], cam_target)
 
-vol_cm3, dim_a, dim_b = compute_abc2_volume(cam_map, curr['meta']['slice_thickness'])
+if curr['is_acute']:
+    vol_cm3, dim_a, dim_b = compute_abc2_volume(cam_map, curr['meta']['slice_thickness'])
+else:
+    vol_cm3, dim_a, dim_b = 0.0, 0.0, 0.0
 midline_shift_mm, is_critical_shift = estimate_midline_shift(curr['hu'])
 
 h_o, w_o, _ = curr['rgb'].shape
