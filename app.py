@@ -87,14 +87,15 @@ def read_scan(file_bytes: bytes, filename: str, wl: float = 40, ww: float = 80):
 
     if filename.lower().endswith(".dcm") and pydicom is not None:
         ds = pydicom.dcmread(io.BytesIO(file_bytes), force=True)
-        if "PhotometricInterpretation" not in ds:
-            ds.PhotometricInterpretation = "MONOCHROME2"
-        if "SamplesPerPixel" not in ds:
-            ds.SamplesPerPixel = 1
         pixel_array = ds.pixel_array.astype(np.float32)
         slope = float(getattr(ds, "RescaleSlope", 1.0))
         intercept = float(getattr(ds, "RescaleIntercept", 0.0))
         hu = pixel_array * slope + intercept
+        
+        # تصحيح الـ PhotometricInterpretation إذا كان مقلوباً
+        if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
+            hu = np.max(hu) - hu
+
         gray = apply_display_window(hu, wl, ww)
         rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
         meta["patient_id"] = str(getattr(ds, "PatientID", meta["patient_id"]))
@@ -113,6 +114,7 @@ def read_scan(file_bytes: bytes, filename: str, wl: float = 40, ww: float = 80):
 
 def predict_with_mc_dropout(model: nn.Module, tensor: torch.Tensor, n_samples: int = 10) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
+    # تفعيل الـ Dropout فقط للطبقة النهائية دون لمس باقي الشبكة
     for m in model.modules():
         if isinstance(m, (nn.Dropout, nn.Dropout2d)):
             m.train()
