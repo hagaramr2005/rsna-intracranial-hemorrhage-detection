@@ -25,83 +25,103 @@ except ImportError:
 
 
 def export_clean_pdf(patient_id, study_date, is_acute, any_prob, df_table, impression, bio_val, shift_mm, orig_img_path, fused_img_path):
-    pdf = FPDF()
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_margins(12, 12, 12)
     pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=False)
     
-    # Header
-    pdf.set_font("Helvetica", "B", 18)
+    # 1. Header
+    pdf.set_font("Helvetica", "B", 16)
     pdf.set_text_color(15, 23, 42)
-    pdf.cell(0, 10, "NEUROSCAN AI - CLINICAL AUDIT REPORT", ln=True, align="C")
+    pdf.cell(0, 8, "NEUROSCAN AI - CLINICAL AUDIT REPORT", ln=True, align="C")
     
-    pdf.set_font("Helvetica", "I", 10)
+    pdf.set_font("Helvetica", "I", 9)
     pdf.set_text_color(100, 116, 139)
-    pdf.cell(0, 6, "Automated Non-Contrast Head CT Triage & Biomarker Synthesis", ln=True, align="C")
-    pdf.ln(5)
+    pdf.cell(0, 5, "Automated Non-Contrast Head CT Triage & Biomarker Synthesis", ln=True, align="C")
+    pdf.ln(3)
     
-    # Patient & Study Information
-    pdf.set_font("Helvetica", "B", 11)
+    # 2. Metadata Box
+    pdf.set_fill_color(248, 250, 252)
+    pdf.rect(12, pdf.get_y(), 186, 14, "F")
+    pdf.set_font("Helvetica", "B", 9)
     pdf.set_text_color(30, 41, 59)
-    pdf.cell(0, 8, f"Patient ID: {patient_id}   |   Study Date: {study_date}   |   Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", ln=True)
-    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-    pdf.ln(5)
+    pdf.set_xy(14, pdf.get_y() + 2)
+    pdf.cell(0, 5, f"Patient ID: {patient_id}   |   Study Date: {study_date}   |   Audit: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", ln=True)
     
-    # Triage Summary Box
-    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_xy(14, pdf.get_y())
     if is_acute:
         pdf.set_text_color(220, 38, 38)
-        status_text = f"TRIAGE ALERT: CRITICAL STAT (Probability: {any_prob*100:.1f}%)"
+        status_txt = f"TRIAGE: CRITICAL STAT ({any_prob*100:.1f}%)"
     elif any_prob >= 0.20:
         pdf.set_text_color(217, 119, 6)
-        status_text = f"TRIAGE ALERT: BORDERLINE / EQUIVOCAL (Probability: {any_prob*100:.1f}%)"
+        status_txt = f"TRIAGE: BORDERLINE / EQUIVOCAL ({any_prob*100:.1f}%)"
     else:
         pdf.set_text_color(16, 185, 129)
-        status_text = f"TRIAGE STATUS: ROUTINE / NEGATIVE (Confidence: {(1-any_prob)*100:.1f}%)"
+        status_txt = f"TRIAGE: ROUTINE / CLEAR ({(1-any_prob)*100:.1f}%)"
+        
+    pdf.cell(65, 5, status_txt, ln=False)
+    pdf.set_text_color(71, 85, 105)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(0, 5, f"Biomarker: {bio_val}  |  Midline Shift: {shift_mm} mm", ln=True)
     
-    pdf.cell(0, 8, status_text, ln=True)
-    pdf.set_text_color(30, 41, 59)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 6, f"Quantitative Biomarkers: Lesion Measure: {bio_val}  |  Tilt-Corrected Midline Shift: {shift_mm} mm", ln=True)
-    pdf.ln(5)
+    pdf.set_y(pdf.get_y() + 6)
     
-    # Visual Fusion Captures
-    y_pos = pdf.get_y()
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(90, 6, "Axial Non-Contrast Input", ln=False, align="C")
-    pdf.cell(10, 6, "", ln=False)
-    pdf.cell(90, 6, "Grad-CAM++ Diagnostic Fusion", ln=True, align="C")
-    
+    # 3. Dual Image Layout
     img_y = pdf.get_y()
-    pdf.image(orig_img_path, x=15, y=img_y, w=80)
-    pdf.image(fused_img_path, x=115, y=img_y, w=80)
-    pdf.set_y(img_y + 85)
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(30, 41, 59)
+    pdf.set_xy(12, img_y)
+    pdf.cell(90, 5, "Axial Non-Contrast Input", align="C")
+    pdf.set_xy(108, img_y)
+    pdf.cell(90, 5, "Grad-CAM++ Diagnostic Fusion", align="C")
     
-    # Subtype Probabilities Table
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(50, 7, "Subtype", 1, 0, "L")
-    pdf.cell(50, 7, "Confidence", 1, 0, "C")
-    pdf.cell(45, 7, "Threshold", 1, 0, "C")
-    pdf.cell(45, 7, "Status", 1, 1, "C")
+    # Render Images safely (62mm height)
+    pdf.image(orig_img_path, x=26, y=img_y + 6, w=62, h=62)
+    pdf.image(fused_img_path, x=122, y=img_y + 6, w=62, h=62)
     
-    pdf.set_font("Helvetica", "", 9)
+    # 4. Probabilities Table (Starts precisely under images)
+    table_y = img_y + 72
+    pdf.set_y(table_y)
+    
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(226, 232, 240)
+    pdf.set_text_color(15, 23, 42)
+    col_w = [50, 46, 45, 45]
+    headers = ["Subtype Category", "Model Confidence (+/- Std)", "Operating Threshold", "Triage Decision"]
+    for w, h in zip(col_w, headers):
+        pdf.cell(w, 6, h, 1, 0, "C", True)
+    pdf.ln()
+    
+    pdf.set_font("Helvetica", "", 8)
     for _, row in df_table.iterrows():
-        pdf.cell(50, 6, str(row["Subtype"]), 1, 0, "L")
-        pdf.cell(50, 6, str(row["Confidence"]), 1, 0, "C")
-        pdf.cell(45, 6, str(row["Threshold"]), 1, 0, "C")
-        pdf.cell(45, 6, str(row["Decision"]), 1, 1, "C")
-    pdf.ln(5)
-    
-    # Clinical Impression
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "STRUCTURED RADIOLOGICAL IMPRESSION:", ln=True)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, impression)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(col_w[0], 5, str(row["Subtype"]), 1, 0, "L")
+        pdf.cell(col_w[1], 5, str(row["Confidence"]), 1, 0, "C")
+        pdf.cell(col_w[2], 5, str(row["Threshold"]), 1, 0, "C")
+        dec = str(row["Decision"])
+        if dec == "POSITIVE":
+            pdf.set_text_color(220, 38, 38)
+            pdf.set_font("Helvetica", "B", 8)
+        else:
+            pdf.set_text_color(100, 116, 139)
+            pdf.set_font("Helvetica", "", 8)
+        pdf.cell(col_w[3], 5, dec, 1, 1, "C")
+        
     pdf.ln(4)
     
-    # Disclaimer
-    pdf.set_font("Helvetica", "I", 8)
+    # 5. Impression Block
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(0, 5, "STRUCTURED RADIOLOGICAL IMPRESSION & RECOMMENDATION:", ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(51, 65, 85)
+    pdf.multi_cell(0, 4.2, impression)
+    pdf.ln(3)
+    
+    # 6. Clinical Disclaimer
+    pdf.set_font("Helvetica", "I", 7.5)
     pdf.set_text_color(148, 163, 184)
-    pdf.multi_cell(0, 4, "DISCLAIMER: This automated audit is generated by NeuroScan AI for clinical decision support and workflow prioritization. Final diagnosis and therapeutic interventions must be validated by a licensed physician.")
+    pdf.multi_cell(0, 3.8, "REGULATORY DISCLAIMER: NeuroScan AI provides computational decision-support triage. Quantitative biomarkers and model predictions do not replace a diagnostic radiologist review. Clinical and surgical management remains solely with the attending physician.")
     
     tmp_out = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     pdf.output(tmp_out.name)
