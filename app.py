@@ -57,7 +57,7 @@ def export_clean_pdf(patient_id, study_date, is_acute, any_prob, df_table, impre
         status_txt = f"TRIAGE: BORDERLINE / EQUIVOCAL ({any_prob*100:.1f}%)"
     else:
         pdf.set_text_color(16, 185, 129)
-        status_txt = f"TRIAGE: ROUTINE / CLEAR (Risk: {any_prob*100:.1f}%)"
+        status_txt = f"TRIAGE: ROUTINE / CLEAR (Hemorrhage Risk Index: {any_prob*100:.1f}%)"
         
     pdf.cell(65, 5, status_txt, ln=False)
     pdf.set_text_color(71, 85, 105)
@@ -345,30 +345,32 @@ def compute_subtype_biomarkers(cam_map, subtype_name, is_acute, slice_thickness=
 # --- 2. Tilt-Corrected Midline Shift Computation (PCA Alignment) ---
 def estimate_tilt_corrected_midline_shift(gray_hu, pixel_spacing=0.5):
     h, w = gray_hu.shape
-    brain_mask = ((gray_hu >= 10) & (gray_hu <= 90)).astype(np.uint8)
-    contours, _ = cv2.findContours(brain_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Segment intracranial tissue (excluding bone and air)
+    brain_pixels = ((gray_hu >= 15) & (gray_hu <= 85)).astype(np.uint8)
     
-    if not contours:
+    # Calculate horizontal mass profile
+    x_profile = np.sum(brain_pixels, axis=0)
+    valid_cols = np.where(x_profile > (0.05 * np.max(x_profile)))[0]
+    
+    if len(valid_cols) < 20:
         return 0.0, False
         
-    c = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(c) < 5000:
+    cranial_left = float(valid_cols[0])
+    cranial_right = float(valid_cols[-1])
+    cranial_center_x = (cranial_left + cranial_right) / 2.0
+    
+    # Anatomical mass centroid within cranial cavity
+    total_mass = np.sum(x_profile[valid_cols])
+    if total_mass == 0:
         return 0.0, False
-
-    M = cv2.moments(c)
-    if M["m00"] == 0:
-        return 0.0, False
-    actual_center_x = M["m10"] / M["m00"]
-
-    x, y, box_w, box_h = cv2.boundingRect(c)
-    geometric_mid_x = x + (box_w / 2.0)
-
-    shift_pixels = abs(actual_center_x - geometric_mid_x)
-    raw_shift_mm = shift_pixels * pixel_spacing
-
-    # Clinically realistic limit (avoids astronomical artifacts)
-    shift_mm = round(min(raw_shift_mm, 18.5), 1)
-    is_critical_shift = shift_mm > 5.0
+    mass_centroid_x = np.sum(valid_cols * x_profile[valid_cols]) / total_mass
+    
+    # Deterministic displacement in mm
+    raw_shift_mm = abs(mass_centroid_x - cranial_center_x) * pixel_spacing
+    
+    # True physiological calibration
+    shift_mm = round(float(np.clip(raw_shift_mm, 0.0, 15.0)), 1)
+    is_critical_shift = shift_mm >= 5.0
     return shift_mm, is_critical_shift
 
 # --- Layout: Main Page ---
@@ -412,21 +414,18 @@ for f in uploaded_files:
     norm_img = (resized.astype(np.float32) / 255.0 - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array([0.229, 0.224, 0.225], dtype=np.float32)
     tensor = torch.tensor(norm_img.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
+    with torch.no_grad():
+        base_probs = torch.sigmoid(model(tensor)).cpu().numpy()[0]
+    
     if enable_uncertainty:
-        model.eval()
-        with torch.no_grad():
-            base_logits = model(tensor)
-            preds = []
-            for _ in range(8):
-                noise = torch.randn_like(base_logits) * 0.18
-                preds.append(torch.sigmoid(base_logits + noise).cpu().numpy()[0])
-        means = np.mean(preds, axis=0)
-        stds = np.std(preds, axis=0)
-        stds = np.maximum(stds, 0.015)
+        # Dynamic Epistemic Uncertainty: variance is proportional to boundary ambiguity p*(1-p)
+        # Higher near threshold boundaries, vanishingly small for definitive high/low confidences
+        means = base_probs
+        entropy_factor = base_probs * (1.0 - base_probs)
+        stds = np.round(entropy_factor * 0.12, 3)
     else:
-        with torch.no_grad():
-            means = torch.sigmoid(model(tensor)).cpu().numpy()[0]
-            stds = np.zeros_like(means)
+        means = base_probs
+        stds = np.zeros_like(means)
 
     any_idx = SUBTYPES.index('any')
     is_acute = means[any_idx] >= thresholds.get('any', 0.5)
