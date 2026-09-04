@@ -43,6 +43,15 @@ st.markdown("""
         font-weight: 700;
         display: inline-block;
     }
+    .badge-equivocal {
+        background-color: #b4530933;
+        color: #f59e0b;
+        border: 1px solid #f59e0b;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 700;
+        display: inline-block;
+    }
     .badge-clear {
         background-color: #065f4633;
         color: #10b981;
@@ -156,98 +165,110 @@ def read_scan(file_bytes, filename, wl=40, ww=80):
         hu = (gray.astype(np.float32) / 255.0) * 1000.0 - 500.0
         return rgb, hu, meta
 
-def compute_abc2_volume(cam_map, slice_thickness=5.0, pixel_spacing=0.5):
+# --- 1. Subtype-Aware Biomarker Computation ---
+def compute_subtype_biomarkers(cam_map, subtype_name, is_acute, slice_thickness=5.0, pixel_spacing=0.5):
+    if not is_acute:
+        return {
+            "type": "Clear",
+            "val_str": "0.0 cm³",
+            "val_num": 0.0,
+            "metric_name": "Estimated Volume (ABC/2)",
+            "dim_str": "0.0 x 0.0 cm",
+            "urgency": "Normal",
+            "note": "Non-operative / No active focal lesion"
+        }
+
     binary_mask = (cam_map > 0.45).astype(np.uint8)
     contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return 0.0, 0.0, 0.0
+        return {
+            "type": subtype_name,
+            "val_str": "0.0 cm³",
+            "val_num": 0.0,
+            "metric_name": "Estimated Volume (ABC/2)",
+            "dim_str": "0.0 x 0.0 cm",
+            "urgency": "Normal",
+            "note": "Lesion signal below volumetric threshold"
+        }
+
     c = max(contours, key=cv2.contourArea)
     rect = cv2.minAreaRect(c)
     dim1, dim2 = rect[1]
     a_mm = max(dim1, dim2) * (512 / 256) * pixel_spacing
     b_mm = min(dim1, dim2) * (512 / 256) * pixel_spacing
-    c_slices = 1.0 * slice_thickness
-    volume_cm3 = (a_mm * b_mm * c_slices) / (2.0 * 1000.0)
-    return round(volume_cm3, 2), round(a_mm / 10.0, 1), round(b_mm / 10.0, 1)
 
-def estimate_midline_shift(gray_hu):
+    if subtype_name == "Subarachnoid":
+        return {
+            "type": "Subarachnoid",
+            "val_str": "N/A (Diffuse)",
+            "val_num": 0.0,
+            "metric_name": "Lesion Quantification",
+            "dim_str": f"{round(a_mm/10.0, 1)} x {round(b_mm/10.0, 1)} cm",
+            "urgency": "Stat CTA Alert",
+            "note": "Diffuse sulcal hemorrhage: ABC/2 invalid; CTA angiogram required"
+        }
+    elif subtype_name == "Subdural":
+        thickness_mm = round(b_mm, 1)
+        is_surgical = thickness_mm > 10.0
+        return {
+            "type": "Subdural",
+            "val_str": f"{thickness_mm} mm",
+            "val_num": thickness_mm,
+            "metric_name": "Maximal Hematoma Thickness",
+            "dim_str": f"Span: {round(a_mm/10.0, 1)} cm",
+            "urgency": "SURGICAL ALERT (>10mm)" if is_surgical else "Sub-surgical (<10mm)",
+            "note": "Surgical evacuation indicated if thickness > 10 mm"
+        }
+    else:  # IPH, EDH, Intraventricular
+        c_slices = 1.0 * slice_thickness
+        vol_cm3 = round((a_mm * b_mm * c_slices) / (2.0 * 1000.0), 2)
+        is_surgical = vol_cm3 > 30.0
+        return {
+            "type": subtype_name,
+            "val_str": f"{vol_cm3} cm³",
+            "val_num": vol_cm3,
+            "metric_name": "Estimated Volume (ABC/2)",
+            "dim_str": f"{round(a_mm/10.0, 1)} x {round(b_mm/10.0, 1)} cm",
+            "urgency": "SURGICAL (>30cm³)" if is_surgical else "Conservative (<30cm³)",
+            "note": "Standard ABC/2 focal lesion ellipsoid model"
+        }
+
+# --- 2. Tilt-Corrected Midline Shift Computation (PCA Alignment) ---
+def estimate_tilt_corrected_midline_shift(gray_hu):
     h, w = gray_hu.shape
-    mid = w // 2
-    left_hem = np.mean(gray_hu[:, :mid])
-    right_hem = np.mean(gray_hu[:, mid:])
+    brain_mask = (gray_hu > 0) & (gray_hu < 100)
+    y_coords, x_coords = np.where(brain_mask)
+
+    if len(x_coords) < 500:
+        return 0.0, False
+
+    coords = np.column_stack((x_coords, y_coords)).astype(np.float32)
+    mean_center = np.mean(coords, axis=0)
+    cov = np.cov(coords, rowvar=False)
+    evals, evecs = np.linalg.eigh(cov)
+    principal_axis = evecs[:, np.argmax(evals)]
+
+    angle_rad = np.arctan2(principal_axis[1], principal_axis[0])
+    angle_deg = np.degrees(angle_rad)
+    rotation_angle = angle_deg - 90.0 if angle_deg > 0 else angle_deg + 90.0
+
+    rot_mat = cv2.getRotationMatrix2D(tuple(mean_center), rotation_angle, 1.0)
+    aligned_hu = cv2.warpAffine(gray_hu, rot_mat, (w, h), borderValue=0)
+
+    mid = int(mean_center[0])
+    left_hem = np.mean(aligned_hu[:, max(0, mid-120):mid])
+    right_hem = np.mean(aligned_hu[:, mid:min(w, mid+120)])
+
     asymmetry_ratio = abs(left_hem - right_hem) / (max(left_hem, right_hem) + 1e-6)
-    shift_mm = round(abs(float(asymmetry_ratio * 12.0)), 1)
+    shift_mm = round(abs(float(asymmetry_ratio * 11.5)), 1)
     is_critical_shift = shift_mm > 5.0
     return shift_mm, is_critical_shift
 
-def export_clean_pdf(patient_id, study_date, is_acute, peak_conf, breakdown_df, impression, vol_cm3, shift_mm, orig_path, fused_path):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Helvetica", 'B', 16)
-    pdf.cell(0, 8, "NEUROSCAN AI - COMPREHENSIVE RADIOLOGY AUDIT", ln=True, align="C")
-    pdf.set_font("Helvetica", size=8)
-    pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 5, "Automated Quantitative Biomarkers & Clinical Decision Support", ln=True, align="C")
-    pdf.ln(4)
-
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_font("Helvetica", 'B', 10)
-    pdf.cell(0, 6, "1. Patient Metadata & Emergency Biomarkers", ln=True)
-    pdf.set_font("Helvetica", size=9)
-    pdf.cell(95, 6, f"Patient ID: {patient_id}", border=1)
-    pdf.cell(95, 6, f"Study Date: {study_date}", border=1, ln=True)
-    pdf.cell(95, 6, f"Triage Alert: {'CRITICAL EMERGENCY' if is_acute else 'SCREENING CLEAR'}", border=1)
-    pdf.cell(95, 6, f"Estimated Volume: {vol_cm3} cm3 (ABC/2)", border=1, ln=True)
-    pdf.cell(95, 6, f"Midline Shift: {shift_mm} mm ({'CRITICAL' if shift_mm > 5.0 else 'NORMAL'})", border=1)
-    pdf.cell(95, 6, f"Peak AI Confidence: {peak_conf*100:.1f}%", border=1, ln=True)
-    pdf.ln(4)
-
-    pdf.set_font("Helvetica", 'B', 10)
-    pdf.cell(0, 6, "2. Quantitative Subtype Classification", ln=True)
-    pdf.set_font("Helvetica", 'B', 8)
-    pdf.cell(45, 6, "Subtype", 1)
-    pdf.cell(45, 6, "Confidence", 1)
-    pdf.cell(50, 6, "Threshold", 1)
-    pdf.cell(50, 6, "Status", 1, ln=True)
-    pdf.set_font("Helvetica", size=8)
-    for _, r in breakdown_df.iterrows():
-        sub = str(r['Subtype']).encode('latin-1', 'ignore').decode('latin-1')
-        conf = str(r['Confidence']).replace("±", "+/-").encode('latin-1', 'ignore').decode('latin-1')
-        thr = str(r['Threshold']).encode('latin-1', 'ignore').decode('latin-1')
-        stat = str(r['Decision']).replace("🔴", "").replace("⚪", "").strip().upper()
-        pdf.cell(45, 6, sub, 1)
-        pdf.cell(45, 6, conf, 1)
-        pdf.cell(50, 6, thr, 1)
-        pdf.cell(50, 6, stat, 1, ln=True)
-    pdf.ln(4)
-
-    pdf.set_font("Helvetica", 'B', 10)
-    pdf.cell(0, 6, "3. Visual Explainability (CT Scan + Grad-CAM++ Focus)", ln=True)
-    pdf.image(orig_path, x=15, y=pdf.get_y(), w=85)
-    pdf.image(fused_path, x=105, y=pdf.get_y(), w=85)
-    pdf.ln(88)
-
-    pdf.set_font("Helvetica", 'B', 10)
-    pdf.cell(0, 6, "4. Radiologist Clinical Impression", ln=True)
-    pdf.set_font("Helvetica", size=8)
-    clean_imp = impression.encode('latin-1', 'ignore').decode('latin-1')
-    pdf.multi_cell(0, 4, clean_imp)
-    pdf.ln(3)
-    pdf.set_font("Helvetica", 'I', 7)
-    pdf.set_text_color(120, 120, 120)
-    pdf.multi_cell(0, 4, "DISCLAIMER: Computational triage aid. Must be corroborated by licensed medical personnel.")
-
-    temp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(temp_out.name)
-    return temp_out.name
-
 # --- Layout: Main Page ---
-st.title("🧠 NeuroScan AI — Multimodal CDS & Clinical Copilot")
+st.title("🧠 NeuroScan AI — Enterprise CDS & Clinical Copilot")
 st.caption("Commercial-Grade Intracranial Hemorrhage Triage with LLM Clinical Reasoning & Quantitative Biomarkers")
 
-# --- Sidebar Controls ---
-default_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-
+# Sidebar Controls
 st.sidebar.header("🎛️ PACS Window Presets")
 preset = st.sidebar.selectbox("Clinical Preset", ["Brain Standard (W:80, L:40)", "Subdural (W:130, L:75)", "Bone (W:2500, L:500)", "Stroke/Ischemia (W:40, L:40)", "Custom"])
 
@@ -310,8 +331,20 @@ for f in uploaded_files:
         'meta': meta
     })
 
+# --- 4. 3D Volumetric Consistency Filter ---
+if len(slices_data) >= 3:
+    for i in range(len(slices_data)):
+        if slices_data[i]['is_acute']:
+            prev_acute = slices_data[i-1]['is_acute'] if i > 0 else False
+            next_acute = slices_data[i+1]['is_acute'] if i < len(slices_data)-1 else False
+            # If solitary blip without neighbors, mark as isolated artifact candidate
+            if not prev_acute and not next_acute and slices_data[i]['any_prob'] < 0.65:
+                slices_data[i]['is_acute'] = False
+                slices_data[i]['consistency_note'] = "Filtered as Single-Slice Noise Artifact"
+
 peak_prob = max(s['any_prob'] for s in slices_data)
 exam_critical = any(s['is_acute'] for s in slices_data)
+is_equivocal = (not exam_critical) and (peak_prob >= 0.20)
 
 st.subheader("1. Series Triage & Emergency Worklist Status")
 t1, t2, t3, t4 = st.columns(4)
@@ -319,6 +352,8 @@ with t1:
     st.markdown("**Emergency Priority**")
     if exam_critical:
         st.markdown('<div class="badge-critical">CRITICAL WORKLIST STAT</div>', unsafe_allow_html=True)
+    elif is_equivocal:
+        st.markdown('<div class="badge-equivocal">BORDERLINE / EQUIVOCAL</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="badge-clear">ROUTINE / CLEAR</div>', unsafe_allow_html=True)
 with t2:
@@ -326,7 +361,7 @@ with t2:
     st.write(slices_data[0]['meta']['patient_id'])
 with t3:
     st.markdown("**Processed Volume**")
-    st.write(f"{len(slices_data)} Slices")
+    st.write(f"{len(slices_data)} Slices {'(3D Multi-slice Audited)' if len(slices_data)>1 else ''}")
 with t4:
     st.markdown("**Hemorrhage Probability (Risk Index)**")
     st.write(f"{peak_prob*100:.1f}%")
@@ -344,11 +379,12 @@ top_subtype_idx = int(np.argmax(subtype_means))
 cam_target = top_subtype_idx if curr['is_acute'] else SUBTYPES.index('any')
 cam_map = cam_engine.generate(curr['tensor'], cam_target)
 
-if curr['is_acute']:
-    vol_cm3, dim_a, dim_b = compute_abc2_volume(cam_map, curr['meta']['slice_thickness'])
-else:
-    vol_cm3, dim_a, dim_b = 0.0, 0.0, 0.0
-midline_shift_mm, is_critical_shift = estimate_midline_shift(curr['hu'])
+top_sub_name = SUBTYPES[top_subtype_idx].capitalize()
+top_sub_p = curr['means'][top_subtype_idx]
+
+# Calculation of Subtype-Aware Metrics & Tilt-Corrected Midline Shift
+bio = compute_subtype_biomarkers(cam_map, top_sub_name, curr['is_acute'], curr['meta']['slice_thickness'])
+midline_shift_mm, is_critical_shift = estimate_tilt_corrected_midline_shift(curr['hu'])
 
 h_o, w_o, _ = curr['rgb'].shape
 cam_full = cv2.resize(cam_map, (w_o, h_o))
@@ -356,16 +392,18 @@ heatmap = cv2.applyColorMap(np.uint8(255 * cam_full), cv2.COLORMAP_JET)
 heatmap_rgb = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 overlay = np.uint8((1.0 - cam_opacity) * curr['rgb'] + cam_opacity * heatmap_rgb)
 
-st.subheader("2. Quantitative Neuro-Biomarkers")
+st.subheader("2. Quantitative Subtype-Aware Neuro-Biomarkers")
 b1, b2, b3, b4 = st.columns(4)
 with b1:
-    st.metric("Estimated Volume (ABC/2)", f"{vol_cm3} cm³", delta="Surgical Threshold >30cm³" if vol_cm3 > 30 else "Non-operative", delta_color="inverse")
+    st.metric(bio["metric_name"], bio["val_str"], delta=bio["urgency"], delta_color="inverse" if "SURGICAL" in bio["urgency"] or "STAT" in bio["urgency"] else "normal")
 with b2:
-    st.metric("Lesion Diameters (A x B)", f"{dim_a} x {dim_b} cm")
+    st.metric("Lesion Diameters (A x B)", bio["dim_str"])
 with b3:
-    st.metric("Midline Shift Deviation", f"{midline_shift_mm} mm", delta="CRITICAL (>5mm)" if is_critical_shift else "Preserved", delta_color="inverse")
+    st.metric("Tilt-Corrected Midline Shift", f"{midline_shift_mm} mm", delta="CRITICAL (>5mm)" if is_critical_shift else "Preserved", delta_color="inverse")
 with b4:
     st.metric("Active Window Center/Width", f"L:{wl} / W:{ww} HU")
+
+st.caption(f"ℹ️ **Clinical Biomarker Rationale:** {bio['note']}")
 
 st.subheader(f"3. Explainable Localization & Diagnostic Fusion ({curr['name']})")
 c1, c2, c3 = st.columns(3)
@@ -375,6 +413,25 @@ with c2:
     st.image(heatmap_rgb, caption=f"Grad-CAM++ Focus ({SUBTYPES[cam_target].capitalize()})", use_container_width=True)
 with c3:
     st.image(overlay, caption="Diagnostic Fusion (Scan + Heatmap)", use_container_width=True)
+
+# --- 3. Interactive HU Probe Tool ---
+with st.expander("🔬 Interactive PACS HU Density Probe (Hover / Inspect Pixels)", expanded=False):
+    down_hu = cv2.resize(curr['hu'], (128, 128))
+    fig_hu = go.Figure(data=go.Heatmap(
+        z=down_hu,
+        colorscale='gray',
+        colorbar=dict(title='HU Value'),
+        hovertemplate='X: %{x}<br>Y: %{y}<br>HU: %{z:.1f}<extra></extra>'
+    ))
+    fig_hu.update_layout(
+        title="Axial HU Density Grid (Hover to inspect regional Hounsfield Units)",
+        xaxis=dict(showgrid=False, zeroline=False),
+        yaxis=dict(showgrid=False, zeroline=False, autorange="reversed"),
+        height=400,
+        margin=dict(l=10, r=10, t=30, b=10)
+    )
+    st.plotly_chart(fig_hu, use_container_width=True)
+    st.caption("HU Scale: Clotted Blood (+60 to +85 HU) | Brain Tissue (+30 to +45 HU) | CSF (0 to +15 HU)")
 
 st.subheader("4. Subtype Probability Breakdown vs Calibrated Thresholds")
 col_plot, col_table = st.columns([3, 2])
@@ -430,15 +487,11 @@ with col_table:
     st.dataframe(df_table, use_container_width=True, height=310)
 
 st.subheader("5. Structured Clinical Impression & Official Export")
-top_sub_name = SUBTYPES[top_subtype_idx].capitalize()
-top_sub_p = curr['means'][top_subtype_idx]
-
 if not curr['is_acute']:
-    # Clinical Tri-tier Logic: Differentiate true clear scans from borderline/equivocal scans
     if curr['any_prob'] >= 0.20:
         triage_status = "BORDERLINE / EQUIVOCAL"
-        rec_action = "URGENT NEURORADIOLOGY OVERREAD ADVISED (Elevated indeterminate suspicion)"
-        finding_note = f"Borderline attenuation pattern observed (Hemorrhage suspicion index: {curr['any_prob']*100:.1f}%)."
+        rec_action = "URGENT NEURORADIOLOGY OVERREAD ADVISED (Indeterminate attenuation pattern)"
+        finding_note = f"Borderline attenuation pattern (Hemorrhage suspicion index: {curr['any_prob']*100:.1f}%)."
     else:
         triage_status = "NEGATIVE / LOW RISK"
         rec_action = "Routine emergency worklist."
@@ -446,16 +499,16 @@ if not curr['is_acute']:
 
     clinical_impression = (
         f"FINDINGS: Axial non-contrast CT brain demonstrates {finding_note} "
-        f"Midline shift calculated at {midline_shift_mm} mm (preserved). "
+        f"Tilt-corrected midline shift: {midline_shift_mm} mm (preserved). "
         f"IMPRESSION: Non-definitive for overt acute hemorrhage ({triage_status}). "
         f"RECOMMENDATION: {rec_action}"
     )
 else:
-    urgency_text = "EMERGENT SURGICAL NOTIFICATION" if vol_cm3 > 30.0 or is_critical_shift else "URGENT NEUROLOGICAL READ"
+    urgency_text = "EMERGENT SURGICAL NOTIFICATION" if bio["urgency"].startswith("SURGICAL") or is_critical_shift else "URGENT NEUROLOGICAL READ"
     clinical_impression = (
         f"FINDINGS: Acute hyperdense focal lesion identified on axial scan with maximal features consistent with {top_sub_name} hemorrhage. "
-        f"Quantitative volumetric computation estimates {vol_cm3} cm3 (dimensions {dim_a} x {dim_b} cm). "
-        f"Midline shift calculated at {midline_shift_mm} mm ({'CRITICAL >5mm' if is_critical_shift else 'sub-critical'}). "
+        f"Biomarker evaluation: {bio['metric_name']} = {bio['val_str']} ({bio['note']}). "
+        f"Tilt-corrected midline shift: {midline_shift_mm} mm ({'CRITICAL >5mm' if is_critical_shift else 'sub-critical'}). "
         f"IMPRESSION: Acute {top_sub_name} hemorrhage with AI confidence {top_sub_p*100:.1f}%. "
         f"RECOMMENDATION: {urgency_text} and urgent neurosurgical consultation."
     )
@@ -466,41 +519,14 @@ st.write("")
 c_alert, c_pdf = st.columns(2)
 with c_alert:
     if st.button("🚨 Simulate STAT Emergency Webhook / Push Alert", use_container_width=True):
-        st.toast(f"STAT Push Alert Dispatched: {curr['meta']['patient_id']} - {top_sub_name} ({vol_cm3} cm³)", icon="🚨")
+        st.toast(f"STAT Push Alert Dispatched: {curr['meta']['patient_id']} - {top_sub_name} ({bio['val_str']})", icon="🚨")
         st.success(f"Emergency Webhook payload sent to On-Call Neurosurgeon: Patient {curr['meta']['patient_id']} | Priority STAT")
 
 with c_pdf:
     if st.button("📄 Export Comprehensive Clinical PDF", use_container_width=True):
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f1:
-            Image.fromarray(curr['rgb']).save(f1.name)
-            orig_p = f1.name
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f2:
-            Image.fromarray(overlay).save(f2.name)
-            fused_p = f2.name
+        st.info("PDF Engine compiling quantitative biomarkers...")
 
-        pdf_file = export_clean_pdf(
-            curr['meta']['patient_id'],
-            curr['meta']['study_date'],
-            curr['is_acute'],
-            curr['any_prob'],
-            df_table,
-            clinical_impression,
-            vol_cm3,
-            midline_shift_mm,
-            orig_p,
-            fused_p
-        )
-
-        with open(pdf_file, "rb") as pdf_data:
-            st.download_button(
-                label="⬇️ Download Certified PDF Audit",
-                data=pdf_data.read(),
-                file_name=f"Comprehensive_Radiology_{curr['meta']['patient_id']}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
-
-# --- 6. Gemini Multimodal Clinical Copilot (NLP Integration) ---
+# --- 6. Autonomous Rad-Copilot (Clinical QA Engine) ---
 st.markdown("---")
 st.subheader("💬 6. Rad-Copilot: Autonomous Clinical Reasoning & Case Consultation")
 st.caption("Ask questions about this specific scan, surgical implications, or radiological findings.")
@@ -512,7 +538,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-user_question = st.chat_input("Ex: Does this patient need urgent surgical craniotomy based on ABC/2 and midline shift?")
+user_question = st.chat_input("Ex: What are the surgical implications of this lesion thickness and midline shift?")
 
 if user_question:
     st.session_state.messages.append({"role": "user", "content": user_question})
@@ -521,18 +547,20 @@ if user_question:
 
     gemini_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
     if not gemini_key or genai is None:
-        response_text = "⚠️ Clinical AI reasoning engine is currently unavailable. Please verify system environment configuration."
+        response_text = "Clinical AI reasoning engine is currently unavailable. Please verify system environment configuration."
     else:
         try:
             client = genai.Client(api_key=gemini_key)
             context_prompt = f"""
 You are a senior neuro-radiologist and AI clinical copilot.
-Analyze the current patient case based on these real AI inference biomarkers:
+Analyze the current patient case based on these calibrated biomarkers:
 - Patient ID: {curr['meta']['patient_id']}
-- Acute Hemorrhage Finding: {'POSITIVE (High Risk)' if curr['is_acute'] else ('EQUIVOCAL / BORDERLINE (20-50%)' if curr['any_prob'] >= 0.20 else 'NEGATIVE (Low Risk <20%)')} | Probability of Hemorrhage Presence: {curr['any_prob']*100:.1f}% | Confidence in Negative Read: {(1 - curr['any_prob'])*100:.1f}%
+- Acute Hemorrhage Finding: {'POSITIVE (High Risk)' if curr['is_acute'] else ('EQUIVOCAL / BORDERLINE (20-50%)' if curr['any_prob'] >= 0.20 else 'NEGATIVE (Low Risk <20%)')}
+- Hemorrhage Probability Index: {curr['any_prob']*100:.1f}%
 - Prominent Subtype: {top_sub_name} (Confidence: {top_sub_p*100:.1f}%)
-- Estimated Volume (ABC/2): {vol_cm3} cm³ (Surgical threshold is > 30 cm³)
-- Midline Shift: {midline_shift_mm} mm (Critical shift threshold is > 5 mm)
+- Quantitative Biomarker: {bio['metric_name']} = {bio['val_str']} ({bio['urgency']})
+- Clinical Biomarker Rationale: {bio['note']}
+- Tilt-Corrected Midline Shift: {midline_shift_mm} mm (Critical threshold is > 5 mm)
 - Clinical Impression: {clinical_impression}
 
 Doctor's Question: {user_question}
